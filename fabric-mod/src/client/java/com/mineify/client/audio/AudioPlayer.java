@@ -33,7 +33,11 @@ public class AudioPlayer {
         return instance;
     }
 
+<<<<<<< Updated upstream
     public void play(String downloadUrl, String title, long startEpochMs) {
+=======
+    public void play(String downloadUrl, String title, long serverElapsedMs, long packetReceivedAtNanos) {
+>>>>>>> Stashed changes
         executor.submit(() -> {
             stopInternal();
             try {
@@ -82,7 +86,26 @@ public class AudioPlayer {
                 currentTitle = title;
                 playing = true;
                 applyVolume(clip);
+<<<<<<< Updated upstream
     
+=======
+
+                long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
+                if (startOffsetMs > 0) {
+                    long clipLengthUs = clip.getMicrosecondLength();
+                    long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
+
+                    if (targetPositionUs >= clipLengthUs) {
+                        MineifyClient.LOGGER.info("Skipping playback for '{}' because track already finished", title);
+                        stopInternal();
+                        return;
+                    }
+
+                    clip.setMicrosecondPosition(targetPositionUs);
+                    MineifyClient.LOGGER.info("Seeking '{}' to {} ms based on server real-time sync", title, targetPositionUs / 1000);
+                }
+
+>>>>>>> Stashed changes
                 clip.start();
                 MineifyClient.LOGGER.info("Playing (synced): {}", title);
             } catch (Exception e) {
@@ -93,6 +116,14 @@ public class AudioPlayer {
         });
     }
 
+<<<<<<< Updated upstream
+=======
+    private long calculateStartOffsetMs(long serverElapsedMs, long packetReceivedAtNanos) {
+        long elapsedSinceReceiveMs = Math.max(0, (System.nanoTime() - packetReceivedAtNanos) / 1_000_000L);
+        long baseOffsetMs = Math.max(0, serverElapsedMs);
+        return baseOffsetMs + elapsedSinceReceiveMs;
+    }
+>>>>>>> Stashed changes
 
     public void stop() {
         executor.submit(this::stopInternal);

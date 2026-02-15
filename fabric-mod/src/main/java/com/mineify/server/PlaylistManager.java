@@ -29,7 +29,7 @@ public class PlaylistManager {
 
     private int currentIndex = -1;
     private boolean isPlaying = false;
-    private long playbackStartTime = 0;
+    private long playbackStartNanos = 0;
     private long currentTrackDurationMs = 0;
     private String currentDownloadUrl = null;
     private ScheduledFuture<?> advanceFuture;
@@ -43,7 +43,11 @@ public class PlaylistManager {
         this.progressFuture = scheduler.scheduleAtFixedRate(() -> {
             if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
                 PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
+<<<<<<< Updated upstream
                 long elapsed = Math.max(0, System.currentTimeMillis() - playbackStartTime);
+=======
+                long elapsed = getElapsedPlaybackMs();
+>>>>>>> Stashed changes
                 float progress = currentTrackDurationMs > 0 ? (float) elapsed / currentTrackDurationMs : 0f;
                 server.execute(() -> broadcastNowPlaying(entry.title(), Math.min(progress, 1f)));
             }
@@ -127,13 +131,23 @@ public class PlaylistManager {
         ServerPlayNetworking.send(player, new PlaylistSyncPacket(new ArrayList<>(playlist)));
         if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
             PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
-            long elapsed = System.currentTimeMillis() - playbackStartTime;
+            long elapsed = getElapsedPlaybackMs();
             float progress = currentTrackDurationMs > 0 ? (float) elapsed / currentTrackDurationMs : 0f;
             ServerPlayNetworking.send(player, new NowPlayingPacket(entry.title(), Math.min(progress, 1f)));
 
             // Send audio to late-joining player
             if (currentDownloadUrl != null) {
+<<<<<<< Updated upstream
                 ServerPlayNetworking.send(player, new PlayAudioPacket(currentDownloadUrl, entry.title(), entry.videoId(), playbackStartTime));
+=======
+                long elapsedMs = getElapsedPlaybackMs();
+                ServerPlayNetworking.send(player, new PlayAudioPacket(
+                        currentDownloadUrl,
+                        entry.title(),
+                        entry.videoId(),
+                        elapsedMs
+                ));
+>>>>>>> Stashed changes
             }
         }
     }
@@ -150,6 +164,7 @@ public class PlaylistManager {
             isPlaying = false;
             currentIndex = -1;
             currentDownloadUrl = null;
+            playbackStartNanos = 0;
             broadcastNowPlaying("", 0f);
             return;
         }
@@ -169,6 +184,7 @@ public class PlaylistManager {
 
             server.execute(() -> {
                 currentDownloadUrl = downloadUrl;
+<<<<<<< Updated upstream
                 
                 // Shared start time: gives clients time to download/decode before "go"
                 final long LEAD_MS = 3000; // tweak 1500–5000
@@ -176,6 +192,18 @@ public class PlaylistManager {
                 
                 Mineify.LOGGER.info("Broadcasting audio to all players: {}", entry.title());
                 PlayAudioPacket packet = new PlayAudioPacket(downloadUrl, entry.title(), entry.videoId(), playbackStartTime);
+=======
+                playbackStartNanos = System.nanoTime();
+
+                Mineify.LOGGER.info("Broadcasting audio to all players: {}", entry.title());
+
+                PlayAudioPacket packet = new PlayAudioPacket(
+                        downloadUrl,
+                        entry.title(),
+                        entry.videoId(),
+                        0L
+                );
+>>>>>>> Stashed changes
                 for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
                     ServerPlayNetworking.send(player, packet);
                 }
@@ -228,6 +256,13 @@ public class PlaylistManager {
         } catch (NumberFormatException e) {
             return 3 * 60 * 1000; // default 3 minutes
         }
+    }
+
+    private long getElapsedPlaybackMs() {
+        if (playbackStartNanos <= 0) {
+            return 0;
+        }
+        return Math.max(0, (System.nanoTime() - playbackStartNanos) / 1_000_000L);
     }
 
     public void shutdown() {

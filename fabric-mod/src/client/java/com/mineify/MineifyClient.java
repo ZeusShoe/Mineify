@@ -95,9 +95,21 @@ public class MineifyClient implements ClientModInitializer {
 
         // Play audio when server sends PlayAudioPacket
         ClientPlayNetworking.registerGlobalReceiver(PlayAudioPacket.ID, (payload, context) -> {
+            long packetReceivedAtNanos = System.nanoTime();
             context.client().execute(() -> {
+<<<<<<< Updated upstream
                 LOGGER.info("Received play audio: {} ({})", payload.title(), payload.downloadUrl());
                 AudioPlayer.getInstance().play(payload.downloadUrl(), payload.title(), payload.startEpochMs());
+=======
+                LOGGER.info("Received play audio: {} ({}) with server elapsed {} ms",
+                        payload.title(), payload.downloadUrl(), payload.serverElapsedMs());
+                AudioPlayer.getInstance().play(
+                        payload.downloadUrl(),
+                        payload.title(),
+                        payload.serverElapsedMs(),
+                        packetReceivedAtNanos
+                );
+>>>>>>> Stashed changes
             });
         });
 
