@@ -43,7 +43,7 @@ public class PlaylistManager {
         this.progressFuture = scheduler.scheduleAtFixedRate(() -> {
             if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
                 PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
-                long elapsed = System.currentTimeMillis() - playbackStartTime;
+                long elapsed = Math.max(0, System.currentTimeMillis() - playbackStartTime);
                 float progress = currentTrackDurationMs > 0 ? (float) elapsed / currentTrackDurationMs : 0f;
                 server.execute(() -> broadcastNowPlaying(entry.title(), Math.min(progress, 1f)));
             }
@@ -133,7 +133,7 @@ public class PlaylistManager {
 
             // Send audio to late-joining player
             if (currentDownloadUrl != null) {
-                ServerPlayNetworking.send(player, new PlayAudioPacket(currentDownloadUrl, entry.title(), entry.videoId()));
+                ServerPlayNetworking.send(player, new PlayAudioPacket(currentDownloadUrl, entry.title(), entry.videoId(), playbackStartTime));
             }
         }
     }
@@ -169,25 +169,27 @@ public class PlaylistManager {
 
             server.execute(() -> {
                 currentDownloadUrl = downloadUrl;
-                playbackStartTime = System.currentTimeMillis();
-
+                
+                // Shared start time: gives clients time to download/decode before "go"
+                final long LEAD_MS = 3000; // tweak 1500–5000
+                playbackStartTime = System.currentTimeMillis() + LEAD_MS;
+                
                 Mineify.LOGGER.info("Broadcasting audio to all players: {}", entry.title());
-
-                PlayAudioPacket packet = new PlayAudioPacket(downloadUrl, entry.title(), entry.videoId());
+                PlayAudioPacket packet = new PlayAudioPacket(downloadUrl, entry.title(), entry.videoId(), playbackStartTime);
                 for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
                     ServerPlayNetworking.send(player, packet);
                 }
-
                 broadcastNowPlaying(entry.title(), 0f);
-
-                // Schedule advance to next track
+                
+                // Schedule advance to next track based on the real (shared) start time
                 if (currentTrackDurationMs > 0) {
                     if (advanceFuture != null) {
                         advanceFuture.cancel(false);
                     }
+                    long msUntilEnd = (playbackStartTime - System.currentTimeMillis()) + currentTrackDurationMs + 2000;
                     advanceFuture = scheduler.schedule(
                             () -> server.execute(this::playNext),
-                            currentTrackDurationMs + 2000, // 2s buffer
+                            Math.max(msUntilEnd, 0),
                             TimeUnit.MILLISECONDS
                     );
                 }
