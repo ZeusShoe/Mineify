@@ -33,15 +33,15 @@ public class AudioPlayer {
         return instance;
     }
 
-    public void play(String downloadUrl, String title) {
+    public void play(String downloadUrl, String title, long startEpochMs) {
         executor.submit(() -> {
             stopInternal();
             try {
                 MineifyClient.LOGGER.info("Downloading audio from: {}", downloadUrl);
+    
                 URL url = new URL(downloadUrl);
                 AudioInputStream ais = AudioSystem.getAudioInputStream(url);
-
-                // Convert to a format the system can play if needed
+    
                 AudioFormat baseFormat = ais.getFormat();
                 AudioFormat playFormat = new AudioFormat(
                         AudioFormat.Encoding.PCM_SIGNED,
@@ -52,13 +52,24 @@ public class AudioPlayer {
                         baseFormat.getSampleRate(),
                         false
                 );
-
                 if (!baseFormat.matches(playFormat)) {
                     ais = AudioSystem.getAudioInputStream(playFormat, ais);
                 }
-
+    
                 Clip clip = AudioSystem.getClip();
                 clip.open(ais);
+    
+                // ---- SYNC: wait/seek to server-defined start time ----
+                long now = System.currentTimeMillis();
+                if (now < startEpochMs) {
+                    Thread.sleep(startEpochMs - now);
+                    now = System.currentTimeMillis();
+                }
+                long offsetUs = Math.max(0, (now - startEpochMs) * 1000L);
+                long maxUs = Math.max(0, clip.getMicrosecondLength() - 1);
+                clip.setMicrosecondPosition(Math.min(offsetUs, maxUs));
+                // ------------------------------------------------------
+    
                 clip.addLineListener(event -> {
                     if (event.getType() == LineEvent.Type.STOP && playing) {
                         playing = false;
@@ -66,14 +77,14 @@ public class AudioPlayer {
                         MineifyClient.LOGGER.info("Audio playback finished");
                     }
                 });
-
+    
                 currentClip = clip;
                 currentTitle = title;
                 playing = true;
                 applyVolume(clip);
+    
                 clip.start();
-
-                MineifyClient.LOGGER.info("Playing: {}", title);
+                MineifyClient.LOGGER.info("Playing (synced): {}", title);
             } catch (Exception e) {
                 MineifyClient.LOGGER.error("Audio playback failed for: {}", title, e);
                 playing = false;
@@ -81,6 +92,7 @@ public class AudioPlayer {
             }
         });
     }
+
 
     public void stop() {
         executor.submit(this::stopInternal);
