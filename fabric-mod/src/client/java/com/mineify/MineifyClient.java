@@ -97,7 +97,7 @@ public class MineifyClient implements ClientModInitializer {
         ClientPlayNetworking.registerGlobalReceiver(PlayAudioPacket.ID, (payload, context) -> {
             context.client().execute(() -> {
                 LOGGER.info("Received play audio: {} ({})", payload.title(), payload.downloadUrl());
-                AudioPlayer.getInstance().play(payload.downloadUrl(), payload.title());
+                AudioPlayer.getInstance().play(payload.downloadUrl(), payload.title(), payload.startEpochMs());
             });
         });
 
