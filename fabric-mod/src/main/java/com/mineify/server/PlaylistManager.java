@@ -3,6 +3,7 @@ package com.mineify.server;
 import com.mineify.Mineify;
 import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
+import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -29,6 +30,8 @@ public class PlaylistManager {
 
     private int currentIndex = -1;
     private boolean isPlaying = false;
+    private boolean paused = false;
+    private long pausedElapsedMs = 0;
     private long playbackStartNanos = 0;
     private long currentTrackDurationMs = 0;
     private String currentDownloadUrl = null;
@@ -39,17 +42,10 @@ public class PlaylistManager {
         this.server = server;
         this.companionClient = companionClient;
 
-        // Broadcast progress every second
         this.progressFuture = scheduler.scheduleAtFixedRate(() -> {
             if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
                 PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
-<<<<<<< Updated upstream
-                long elapsed = Math.max(0, System.currentTimeMillis() - playbackStartTime);
-=======
-                long elapsed = getElapsedPlaybackMs();
->>>>>>> Stashed changes
-                float progress = currentTrackDurationMs > 0 ? (float) elapsed / currentTrackDurationMs : 0f;
-                server.execute(() -> broadcastNowPlaying(entry.title(), Math.min(progress, 1f)));
+                server.execute(() -> broadcastNowPlaying(entry.title(), getElapsedPlaybackMs()));
             }
         }, 1, 1, TimeUnit.SECONDS);
     }
@@ -87,7 +83,6 @@ public class PlaylistManager {
     public void handleRemoveFromPlaylist(ServerPlayerEntity player, String videoId) {
         String playerName = player.getName().getString();
 
-        // Find the index of the entry to remove (only if player is the owner)
         int removeIndex = -1;
         for (int i = 0; i < playlist.size(); i++) {
             PlaylistSyncPacket.Entry entry = playlist.get(i);
@@ -104,73 +99,88 @@ public class PlaylistManager {
 
         playlist.remove(removeIndex);
         Mineify.LOGGER.info("{} removed {} from playlist", playerName, videoId);
-
-        // Delete the downloaded file from companion service
         companionClient.deleteDownload(videoId);
 
-        // Handle index adjustments when removing songs
         if (currentIndex >= 0) {
             if (removeIndex < currentIndex) {
-                // Removed a song before the current one - adjust index
                 currentIndex--;
             } else if (removeIndex == currentIndex) {
-                // Removed the currently playing song - cancel current playback and play next
                 if (advanceFuture != null) {
                     advanceFuture.cancel(false);
                 }
-                currentIndex--; // playNext will increment it
+                currentIndex--;
                 playNext();
             }
-            // If removeIndex > currentIndex, no adjustment needed
         }
 
         syncToAll();
+    }
+
+    public void handlePlaybackControl(ServerPlayerEntity player, String action) {
+        if (action == null) {
+            return;
+        }
+
+        switch (action.toLowerCase()) {
+            case "skip" -> {
+                Mineify.LOGGER.info("Player {} requested skip", player.getName().getString());
+                if (isPlaying) {
+                    if (advanceFuture != null) {
+                        advanceFuture.cancel(false);
+                    }
+                    advanceAfterTrackEnd();
+                }
+            }
+            case "pause" -> {
+                Mineify.LOGGER.info("Player {} requested pause", player.getName().getString());
+                pausePlayback();
+            }
+            case "resume" -> {
+                Mineify.LOGGER.info("Player {} requested resume", player.getName().getString());
+                resumePlayback();
+            }
+            default -> Mineify.LOGGER.warn("Unknown playback action '{}'", action);
+        }
     }
 
     public void syncToPlayer(ServerPlayerEntity player) {
         ServerPlayNetworking.send(player, new PlaylistSyncPacket(new ArrayList<>(playlist)));
         if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
             PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
-            long elapsed = getElapsedPlaybackMs();
-            float progress = currentTrackDurationMs > 0 ? (float) elapsed / currentTrackDurationMs : 0f;
-            ServerPlayNetworking.send(player, new NowPlayingPacket(entry.title(), Math.min(progress, 1f)));
+            long elapsedMs = getElapsedPlaybackMs();
+            ServerPlayNetworking.send(player, buildNowPlayingPacket(entry.title(), elapsedMs));
 
-            // Send audio to late-joining player
             if (currentDownloadUrl != null) {
-<<<<<<< Updated upstream
-                ServerPlayNetworking.send(player, new PlayAudioPacket(currentDownloadUrl, entry.title(), entry.videoId(), playbackStartTime));
-=======
-                long elapsedMs = getElapsedPlaybackMs();
                 ServerPlayNetworking.send(player, new PlayAudioPacket(
                         currentDownloadUrl,
                         entry.title(),
                         entry.videoId(),
                         elapsedMs
                 ));
->>>>>>> Stashed changes
             }
+
+            ServerPlayNetworking.send(player, new PlaybackStatePacket(paused));
         }
     }
 
     private void playNext() {
-        // Delete the previous song's download if there was one
-        if (currentIndex >= 0 && currentIndex < playlist.size()) {
-            String previousVideoId = playlist.get(currentIndex).videoId();
-            companionClient.deleteDownload(previousVideoId);
-        }
-
         currentIndex++;
         if (currentIndex >= playlist.size()) {
             isPlaying = false;
+            paused = false;
+            pausedElapsedMs = 0;
             currentIndex = -1;
             currentDownloadUrl = null;
             playbackStartNanos = 0;
-            broadcastNowPlaying("", 0f);
+            broadcastNowPlaying("", 0);
+            broadcastPlaybackState(false);
             return;
         }
 
         PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
         isPlaying = true;
+        paused = false;
+        pausedElapsedMs = 0;
         currentTrackDurationMs = parseDuration(entry.duration());
 
         Mineify.LOGGER.info("Requesting download for: {} ({})", entry.title(), entry.videoId());
@@ -184,18 +194,7 @@ public class PlaylistManager {
 
             server.execute(() -> {
                 currentDownloadUrl = downloadUrl;
-<<<<<<< Updated upstream
-                
-                // Shared start time: gives clients time to download/decode before "go"
-                final long LEAD_MS = 3000; // tweak 1500–5000
-                playbackStartTime = System.currentTimeMillis() + LEAD_MS;
-                
-                Mineify.LOGGER.info("Broadcasting audio to all players: {}", entry.title());
-                PlayAudioPacket packet = new PlayAudioPacket(downloadUrl, entry.title(), entry.videoId(), playbackStartTime);
-=======
                 playbackStartNanos = System.nanoTime();
-
-                Mineify.LOGGER.info("Broadcasting audio to all players: {}", entry.title());
 
                 PlayAudioPacket packet = new PlayAudioPacket(
                         downloadUrl,
@@ -203,26 +202,70 @@ public class PlaylistManager {
                         entry.videoId(),
                         0L
                 );
->>>>>>> Stashed changes
-                for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-                    ServerPlayNetworking.send(player, packet);
+                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+                    ServerPlayNetworking.send(p, packet);
                 }
-                broadcastNowPlaying(entry.title(), 0f);
-                
-                // Schedule advance to next track based on the real (shared) start time
-                if (currentTrackDurationMs > 0) {
-                    if (advanceFuture != null) {
-                        advanceFuture.cancel(false);
-                    }
-                    long msUntilEnd = (playbackStartTime - System.currentTimeMillis()) + currentTrackDurationMs + 2000;
-                    advanceFuture = scheduler.schedule(
-                            () -> server.execute(this::playNext),
-                            Math.max(msUntilEnd, 0),
-                            TimeUnit.MILLISECONDS
-                    );
-                }
+
+                broadcastPlaybackState(false);
+                broadcastNowPlaying(entry.title(), 0L);
+                scheduleAdvanceFromCurrentState();
             });
         });
+    }
+
+    private void advanceAfterTrackEnd() {
+        if (currentIndex >= 0 && currentIndex < playlist.size()) {
+            PlaylistSyncPacket.Entry finished = playlist.remove(currentIndex);
+            companionClient.deleteDownload(finished.videoId());
+            currentIndex--;
+            syncToAll();
+        }
+        playNext();
+    }
+
+    private void pausePlayback() {
+        if (!isPlaying || paused || currentIndex < 0 || currentIndex >= playlist.size()) {
+            return;
+        }
+
+        pausedElapsedMs = getElapsedPlaybackMs();
+        paused = true;
+        cancelAdvanceSchedule();
+        broadcastPlaybackState(true);
+        broadcastNowPlaying(playlist.get(currentIndex).title(), pausedElapsedMs);
+    }
+
+    private void resumePlayback() {
+        if (!isPlaying || !paused || currentIndex < 0 || currentIndex >= playlist.size()) {
+            return;
+        }
+
+        playbackStartNanos = System.nanoTime() - (pausedElapsedMs * 1_000_000L);
+        paused = false;
+        broadcastPlaybackState(false);
+        broadcastNowPlaying(playlist.get(currentIndex).title(), getElapsedPlaybackMs());
+        scheduleAdvanceFromCurrentState();
+    }
+
+    private void scheduleAdvanceFromCurrentState() {
+        cancelAdvanceSchedule();
+        if (!isPlaying || paused || currentTrackDurationMs <= 0) {
+            return;
+        }
+
+        long remainingMs = Math.max(0, currentTrackDurationMs - getElapsedPlaybackMs());
+        advanceFuture = scheduler.schedule(
+                () -> server.execute(this::advanceAfterTrackEnd),
+                remainingMs + 2000,
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    private void cancelAdvanceSchedule() {
+        if (advanceFuture != null) {
+            advanceFuture.cancel(false);
+            advanceFuture = null;
+        }
     }
 
     private void syncToAll() {
@@ -232,19 +275,30 @@ public class PlaylistManager {
         }
     }
 
-    private void broadcastNowPlaying(String title, float progress) {
-        NowPlayingPacket packet = new NowPlayingPacket(title, progress);
+    private void broadcastNowPlaying(String title, long elapsedMs) {
+        NowPlayingPacket packet = buildNowPlayingPacket(title, elapsedMs);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, packet);
         }
     }
 
-    /**
-     * Parse duration string like "3:45" or "1:02:30" to milliseconds.
-     */
+    private NowPlayingPacket buildNowPlayingPacket(String title, long elapsedMs) {
+        long safeDurationMs = Math.max(0, currentTrackDurationMs);
+        long safeElapsedMs = Math.max(0, Math.min(elapsedMs, safeDurationMs));
+        float progress = safeDurationMs > 0 ? (float) safeElapsedMs / safeDurationMs : 0f;
+        return new NowPlayingPacket(title, Math.min(progress, 1f), safeElapsedMs, safeDurationMs, paused);
+    }
+
+    private void broadcastPlaybackState(boolean pausedValue) {
+        PlaybackStatePacket packet = new PlaybackStatePacket(pausedValue);
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(player, packet);
+        }
+    }
+
     private long parseDuration(String duration) {
         if (duration == null || duration.isEmpty()) {
-            return 3 * 60 * 1000; // default 3 minutes
+            return 3 * 60 * 1000;
         }
         try {
             String[] parts = duration.split(":");
@@ -254,11 +308,17 @@ public class PlaylistManager {
             }
             return seconds * 1000;
         } catch (NumberFormatException e) {
-            return 3 * 60 * 1000; // default 3 minutes
+            return 3 * 60 * 1000;
         }
     }
 
     private long getElapsedPlaybackMs() {
+        if (!isPlaying) {
+            return 0;
+        }
+        if (paused) {
+            return Math.max(0, pausedElapsedMs);
+        }
         if (playbackStartNanos <= 0) {
             return 0;
         }
@@ -266,8 +326,10 @@ public class PlaylistManager {
     }
 
     public void shutdown() {
-        if (advanceFuture != null) advanceFuture.cancel(true);
-        if (progressFuture != null) progressFuture.cancel(true);
+        cancelAdvanceSchedule();
+        if (progressFuture != null) {
+            progressFuture.cancel(true);
+        }
         scheduler.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
