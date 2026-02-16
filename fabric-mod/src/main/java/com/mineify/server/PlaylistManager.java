@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 import com.mineify.Mineify;
+import com.mineify.MineifyConfig;
 import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
@@ -69,9 +70,10 @@ public class PlaylistManager {
         this.userPlaylistsFile = server.getRunDirectory()
                 .resolve("MineifyCompanion")
                 .resolve("playlists.json");
-        this.recentlyPlayedFile = server.getRunDirectory()
-                .resolve("MineifyCompanion")
-                .resolve("recently_played.json");
+        Path configuredRecentlyPath = Path.of(MineifyConfig.getRecentlyPlayedPersistPath());
+        this.recentlyPlayedFile = configuredRecentlyPath.isAbsolute()
+                ? configuredRecentlyPath
+                : server.getRunDirectory().resolve(configuredRecentlyPath);
         loadUserPlaylists();
         loadRecentlyPlayed();
 
@@ -80,7 +82,7 @@ public class PlaylistManager {
                 PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
                 server.execute(() -> broadcastNowPlaying(entry.title(), getElapsedPlaybackMs()));
             }
-        }, 1, 1, TimeUnit.SECONDS);
+        }, 1000, Math.max(250, MineifyConfig.getPlaybackProgressBroadcastIntervalMs()), TimeUnit.MILLISECONDS);
     }
 
     public void handleSearch(ServerPlayerEntity player, String query) {
@@ -101,6 +103,10 @@ public class PlaylistManager {
 
     public void handleAddToPlaylist(ServerPlayerEntity player, String videoId, String title, String duration) {
         Mineify.LOGGER.info("Player {} adding to playlist: {}", player.getName().getString(), title);
+        if (playlist.size() >= MineifyConfig.getMaxPlaylistSize()) {
+            player.sendMessage(net.minecraft.text.Text.literal("Queue is full (max " + MineifyConfig.getMaxPlaylistSize() + ")."), false);
+            return;
+        }
 
         PlaylistSyncPacket.Entry entry = new PlaylistSyncPacket.Entry(
                 videoId, title, duration, player.getName().getString()
@@ -247,6 +253,10 @@ public class PlaylistManager {
     }
 
     public void handleStartSpotifyImport(ServerPlayerEntity player, String spotifyUrl, String targetPlaylistId) {
+        if (!MineifyConfig.isSpotifyImportEnabled()) {
+            player.sendMessage(net.minecraft.text.Text.literal("Spotify import is disabled by server config."), false);
+            return;
+        }
         if (spotifyUrl == null || spotifyUrl.isBlank() || targetPlaylistId == null || targetPlaylistId.isBlank()) {
             return;
         }
@@ -266,7 +276,11 @@ public class PlaylistManager {
                     return;
                 }
 
-                SpotifyImportSession session = new SpotifyImportSession(playerId, targetPlaylistId, tracks);
+                int maxTracks = Math.max(1, MineifyConfig.getSpotifyImportMaxTracksPerImport());
+                List<CompanionClient.SpotifyTrack> limitedTracks = tracks.size() > maxTracks
+                        ? new ArrayList<>(tracks.subList(0, maxTracks))
+                        : tracks;
+                SpotifyImportSession session = new SpotifyImportSession(playerId, targetPlaylistId, limitedTracks);
                 spotifyImportSessions.put(playerId, session);
                 processSpotifyImportNext(player);
             });
@@ -290,8 +304,12 @@ public class PlaylistManager {
         }
 
         if (chosen != null) {
-            addTrackToUserPlaylistInternal(player.getUuidAsString(), session.targetPlaylistId, chosen.videoId(), chosen.title(), chosen.duration());
-            session.addedCount++;
+            boolean added = addTrackToUserPlaylistInternal(player.getUuidAsString(), session.targetPlaylistId, chosen.videoId(), chosen.title(), chosen.duration());
+            if (added) {
+                session.addedCount++;
+            } else {
+                session.skippedCount++;
+            }
         } else {
             session.skippedCount++;
             session.unresolvedCount++;
@@ -320,11 +338,15 @@ public class PlaylistManager {
         if (trimmedName.isEmpty()) {
             return;
         }
-        if (trimmedName.length() > 50) {
-            trimmedName = trimmedName.substring(0, 50);
+        if (trimmedName.length() > MineifyConfig.getPlaylistsMaxNameLength()) {
+            trimmedName = trimmedName.substring(0, MineifyConfig.getPlaylistsMaxNameLength());
         }
 
         List<UserPlaylist> userPlaylists = userPlaylistsByOwner.computeIfAbsent(player.getUuidAsString(), key -> new ArrayList<>());
+        if (userPlaylists.size() >= MineifyConfig.getPlaylistsMaxPerUser()) {
+            player.sendMessage(net.minecraft.text.Text.literal("You reached the max playlists limit (" + MineifyConfig.getPlaylistsMaxPerUser() + ")."), false);
+            return;
+        }
         UserPlaylist playlistModel = new UserPlaylist(
                 UUID.randomUUID().toString(),
                 player.getUuidAsString(),
@@ -480,7 +502,7 @@ public class PlaylistManager {
         long remainingMs = Math.max(0, currentTrackDurationMs - getElapsedPlaybackMs());
         advanceFuture = scheduler.schedule(
                 () -> server.execute(this::advanceAfterTrackEnd),
-                remainingMs + 2000,
+                remainingMs + Math.max(0, MineifyConfig.getPlaybackTrackEndPaddingMs()),
                 TimeUnit.MILLISECONDS
         );
     }
@@ -535,6 +557,10 @@ public class PlaylistManager {
     }
 
     private void syncRecentlyPlayedToPlayer(ServerPlayerEntity player) {
+        if (!MineifyConfig.isRecentlyPlayedEnabled()) {
+            ServerPlayNetworking.send(player, new RecentlyPlayedSyncPacket(List.of()));
+            return;
+        }
         List<RecentlyPlayedSyncPacket.Entry> entries = new ArrayList<>(recentlyPlayed.size());
         for (RecentlyPlayedEntry entry : recentlyPlayed) {
             entries.add(new RecentlyPlayedSyncPacket.Entry(
@@ -554,17 +580,22 @@ public class PlaylistManager {
     }
 
     private void recordRecentlyPlayed(PlaylistSyncPacket.Entry entry) {
+        if (!MineifyConfig.isRecentlyPlayedEnabled()) {
+            return;
+        }
         recentlyPlayed.add(0, new RecentlyPlayedEntry(
                 entry.videoId(),
                 entry.title(),
                 entry.duration(),
                 System.currentTimeMillis()
         ));
-        if (recentlyPlayed.size() > 200) {
+        if (recentlyPlayed.size() > MineifyConfig.getRecentlyPlayedMaxEntries()) {
             recentlyPlayed.remove(recentlyPlayed.size() - 1);
         }
         saveRecentlyPlayed();
-        broadcastRecentlyPlayed();
+        if (MineifyConfig.isRecentlyPlayedBroadcastOnUpdate()) {
+            broadcastRecentlyPlayed();
+        }
     }
 
     private void processSpotifyImportNext(ServerPlayerEntity player) {
@@ -609,10 +640,14 @@ public class PlaylistManager {
         List<CompanionClient.SearchResult> topResults = new ArrayList<>(results.subList(0, topCount));
         double bestScore = scoreMatch(spotifyTrack, topResults.get(0));
 
-        if (bestScore >= 0.72d) {
+        if (bestScore >= MineifyConfig.getSpotifyImportAutoMatchThreshold()) {
             CompanionClient.SearchResult best = topResults.get(0);
-            addTrackToUserPlaylistInternal(player.getUuidAsString(), session.targetPlaylistId, best.videoId(), best.title(), best.duration());
-            session.addedCount++;
+            boolean added = addTrackToUserPlaylistInternal(player.getUuidAsString(), session.targetPlaylistId, best.videoId(), best.title(), best.duration());
+            if (added) {
+                session.addedCount++;
+            } else {
+                session.skippedCount++;
+            }
             session.currentIndex++;
             processSpotifyImportNext(player);
             return;
@@ -693,6 +728,9 @@ public class PlaylistManager {
         if (playlistModel == null) {
             return false;
         }
+        if (playlistModel.tracks.size() >= MineifyConfig.getPlaylistsMaxTracksPerPlaylist()) {
+            return false;
+        }
         playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
         return true;
     }
@@ -749,6 +787,10 @@ public class PlaylistManager {
     }
 
     private void loadRecentlyPlayed() {
+        if (!MineifyConfig.isRecentlyPlayedEnabled()) {
+            recentlyPlayed.clear();
+            return;
+        }
         if (!Files.exists(recentlyPlayedFile)) {
             return;
         }
@@ -760,6 +802,9 @@ public class PlaylistManager {
             recentlyPlayed.clear();
             if (loaded != null) {
                 recentlyPlayed.addAll(loaded);
+                while (recentlyPlayed.size() > MineifyConfig.getRecentlyPlayedMaxEntries()) {
+                    recentlyPlayed.remove(recentlyPlayed.size() - 1);
+                }
             }
             Mineify.LOGGER.info("Loaded {} recently played entries", recentlyPlayed.size());
         } catch (IOException e) {
@@ -779,6 +824,9 @@ public class PlaylistManager {
     }
 
     private void saveRecentlyPlayed() {
+        if (!MineifyConfig.isRecentlyPlayedEnabled()) {
+            return;
+        }
         try {
             Files.createDirectories(recentlyPlayedFile.getParent());
             try (Writer writer = Files.newBufferedWriter(recentlyPlayedFile)) {

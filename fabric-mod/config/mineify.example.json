@@ -1,0 +1,26 @@
+{
+  "companionServiceUrl": "http://localhost:3001",
+  "maxPlaylistSize": 50,
+  "audioSessionFolder": "./mineify-sessions",
+  "playback": {
+    "trackEndPaddingMs": 2000,
+    "progressBroadcastIntervalMs": 1000
+  },
+  "recentlyPlayed": {
+    "enabled": true,
+    "maxEntries": 200,
+    "persistPath": "MineifyCompanion/recently_played.json",
+    "broadcastOnUpdate": true
+  },
+  "spotifyImport": {
+    "enabled": true,
+    "autoMatchThreshold": 0.72,
+    "maxTracksPerImport": 300
+  },
+  "playlists": {
+    "maxPlaylistsPerUser": 25,
+    "maxTracksPerPlaylist": 500,
+    "maxNameLength": 50,
+    "defaultPublic": true
+  }
+}
