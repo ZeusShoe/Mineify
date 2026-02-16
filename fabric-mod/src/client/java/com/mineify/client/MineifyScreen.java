@@ -4,6 +4,7 @@ import com.mineify.MineifyClient;
 import com.mineify.client.audio.AudioPlayer;
 import com.mineify.network.packets.AddToPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
+import com.mineify.network.packets.ReorderQueuePacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
 import net.fabricmc.api.EnvType;
@@ -31,6 +32,10 @@ public class MineifyScreen extends Screen {
     private static final int VOLUME_HEIGHT = 20;
     private static final int BOTTOM_PADDING = 8;
     private static final int CONTROL_SECTION_WIDTH = 120;
+    private static final int LIST_ITEM_HEIGHT = 25;
+    private static final int SEARCH_PLAYLIST_BUTTON_WIDTH = 56;
+    private static final int SEARCH_QUEUE_BUTTON_WIDTH = 48;
+    private static final int SEARCH_BUTTON_GAP = 4;
 
     private TextFieldWidget searchField;
     private ButtonWidget searchButton;
@@ -50,6 +55,9 @@ public class MineifyScreen extends Screen {
     private long playbackElapsedMs = 0;
     private long playbackDurationMs = 0;
     private boolean playbackPaused = false;
+    private boolean queueDragActive = false;
+    private int queueDragFromIndex = -1;
+    private int queueDragTargetIndex = -1;
 
     private String currentPlayerName;
 
@@ -166,7 +174,7 @@ public class MineifyScreen extends Screen {
     private void renderSearchTab(DrawContext context, int panelLeft, int panelTop, int mouseX, int mouseY) {
         int listTop = panelTop + 55;
         int listBottom = getListBottom(panelTop);
-        int itemHeight = 25;
+        int itemHeight = LIST_ITEM_HEIGHT;
 
         if (searchResults.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Search for songs above"),
@@ -181,12 +189,50 @@ public class MineifyScreen extends Screen {
                 int bgColor = hovered ? 0x44FFFFFF : 0x22FFFFFF;
                 context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + itemHeight - 2, bgColor);
 
-                String title = truncateText(result.title, PANEL_WIDTH - 80);
-                context.drawTextWithShadow(this.textRenderer, Text.literal(title), panelLeft + 15, y + 4, 0xFFFFFFFF);
-                context.drawTextWithShadow(this.textRenderer, Text.literal(result.duration), panelLeft + PANEL_WIDTH - 50, y + 4, 0xFFAAAAAA);
+                int rowRight = panelLeft + PANEL_WIDTH - 10;
+                int queueButtonX = rowRight - SEARCH_QUEUE_BUTTON_WIDTH;
+                int playlistButtonX = queueButtonX - SEARCH_BUTTON_GAP - SEARCH_PLAYLIST_BUTTON_WIDTH;
+                int buttonY = y + 4;
 
-                String channel = truncateText(result.channel, PANEL_WIDTH - 40);
+                int titleMaxWidth = Math.max(20, playlistButtonX - (panelLeft + 15) - 6);
+                String title = truncateText(result.title, titleMaxWidth);
+                context.drawTextWithShadow(this.textRenderer, Text.literal(title), panelLeft + 15, y + 4, 0xFFFFFFFF);
+                String channel = truncateText(result.channel, titleMaxWidth);
                 context.drawTextWithShadow(this.textRenderer, Text.literal(channel), panelLeft + 15, y + 14, 0xFF888888);
+
+                boolean playlistHovered = mouseX >= playlistButtonX && mouseX <= playlistButtonX + SEARCH_PLAYLIST_BUTTON_WIDTH
+                        && mouseY >= buttonY && mouseY <= buttonY + 16;
+                boolean queueHovered = mouseX >= queueButtonX && mouseX <= queueButtonX + SEARCH_QUEUE_BUTTON_WIDTH
+                        && mouseY >= buttonY && mouseY <= buttonY + 16;
+
+                context.fill(
+                        playlistButtonX,
+                        buttonY,
+                        playlistButtonX + SEARCH_PLAYLIST_BUTTON_WIDTH,
+                        buttonY + 16,
+                        playlistHovered ? 0xAA3366FF : 0x663366FF
+                );
+                context.fill(
+                        queueButtonX,
+                        buttonY,
+                        queueButtonX + SEARCH_QUEUE_BUTTON_WIDTH,
+                        buttonY + 16,
+                        queueHovered ? 0xAA33AA33 : 0x6633AA33
+                );
+                context.drawCenteredTextWithShadow(
+                        this.textRenderer,
+                        Text.literal("Playlist"),
+                        playlistButtonX + (SEARCH_PLAYLIST_BUTTON_WIDTH / 2),
+                        buttonY + 4,
+                        0xFFFFFFFF
+                );
+                context.drawCenteredTextWithShadow(
+                        this.textRenderer,
+                        Text.literal("Queue"),
+                        queueButtonX + (SEARCH_QUEUE_BUTTON_WIDTH / 2),
+                        buttonY + 4,
+                        0xFFFFFFFF
+                );
 
                 y += itemHeight;
             }
@@ -196,7 +242,7 @@ public class MineifyScreen extends Screen {
     private void renderPlaylistTab(DrawContext context, int panelLeft, int panelTop, int mouseX, int mouseY) {
         int listTop = panelTop + 55;
         int listBottom = getListBottom(panelTop);
-        int itemHeight = 25;
+        int itemHeight = LIST_ITEM_HEIGHT;
 
         if (playlist.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue is empty"),
@@ -212,6 +258,9 @@ public class MineifyScreen extends Screen {
                 boolean isPlaying = i == 0 && nowPlaying != null;
 
                 int bgColor = isPlaying ? 0x4400FF00 : (hovered ? 0x44FFFFFF : 0x22FFFFFF);
+                if (queueDragActive && i == queueDragTargetIndex) {
+                    bgColor = 0x66FFFF55;
+                }
                 context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + itemHeight - 2, bgColor);
 
                 String pos = (i + 1) + ".";
@@ -287,14 +336,25 @@ public class MineifyScreen extends Screen {
             int panelTop = centerY - PANEL_HEIGHT / 2;
             int listTop = panelTop + 55;
             int listBottom = getListBottom(panelTop);
-            int itemHeight = 25;
+            int itemHeight = LIST_ITEM_HEIGHT;
 
             if (currentTab == 0 && !searchResults.isEmpty()) {
                 int y = listTop;
                 for (int i = searchScrollOffset; i < searchResults.size() && y + itemHeight <= listBottom; i++) {
-                    if (mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
-                            && mouseY >= y && mouseY < y + itemHeight) {
-                        addToPlaylist(searchResults.get(i));
+                    int rowRight = panelLeft + PANEL_WIDTH - 10;
+                    int queueButtonX = rowRight - SEARCH_QUEUE_BUTTON_WIDTH;
+                    int playlistButtonX = queueButtonX - SEARCH_BUTTON_GAP - SEARCH_PLAYLIST_BUTTON_WIDTH;
+                    int buttonY = y + 4;
+
+                    if (mouseX >= queueButtonX && mouseX <= queueButtonX + SEARCH_QUEUE_BUTTON_WIDTH
+                            && mouseY >= buttonY && mouseY <= buttonY + 16) {
+                        addToQueue(searchResults.get(i));
+                        return true;
+                    }
+
+                    if (mouseX >= playlistButtonX && mouseX <= playlistButtonX + SEARCH_PLAYLIST_BUTTON_WIDTH
+                            && mouseY >= buttonY && mouseY <= buttonY + 16) {
+                        addToPlaylistLibrary(searchResults.get(i));
                         return true;
                     }
                     y += itemHeight;
@@ -314,6 +374,14 @@ public class MineifyScreen extends Screen {
                             return true;
                         }
                     }
+
+                    if (mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
+                            && mouseY >= y && mouseY < y + itemHeight) {
+                        queueDragActive = true;
+                        queueDragFromIndex = i;
+                        queueDragTargetIndex = i;
+                        return true;
+                    }
                     y += itemHeight;
                 }
             }
@@ -322,7 +390,43 @@ public class MineifyScreen extends Screen {
     }
 
     @Override
+    public boolean mouseDragged(Click click, double deltaX, double deltaY) {
+        if (click.button() == 0 && queueDragActive && currentTab == 1) {
+            int target = getQueueIndexFromMouse(click.y());
+            if (target >= 0) {
+                queueDragTargetIndex = target;
+            }
+            return true;
+        }
+        return super.mouseDragged(click, deltaX, deltaY);
+    }
+
+    @Override
+    public boolean mouseReleased(Click click) {
+        if (click.button() == 0 && queueDragActive) {
+            int from = queueDragFromIndex;
+            int to = getQueueIndexFromMouse(click.y());
+            if (to < 0) {
+                to = queueDragTargetIndex;
+            }
+
+            queueDragActive = false;
+            queueDragFromIndex = -1;
+            queueDragTargetIndex = -1;
+
+            if (from >= 0 && to >= 0 && from != to) {
+                ClientPlayNetworking.send(new ReorderQueuePacket(from, to));
+            }
+            return true;
+        }
+        return super.mouseReleased(click);
+    }
+
+    @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (queueDragActive) {
+            return true;
+        }
         int visibleItems = 5;
         if (currentTab == 0) {
             searchScrollOffset = Math.max(0, Math.min(searchScrollOffset - (int) verticalAmount, Math.max(0, searchResults.size() - visibleItems)));
@@ -354,10 +458,18 @@ public class MineifyScreen extends Screen {
         this.currentTab = 0;
     }
 
-    private void addToPlaylist(SearchResult result) {
-        MineifyClient.LOGGER.info("Adding to playlist: {}", result.title);
+    private void addToQueue(SearchResult result) {
+        MineifyClient.LOGGER.info("Adding to queue: {}", result.title);
         ClientPlayNetworking.send(new AddToPlaylistPacket(result.videoId, result.title, result.duration));
         this.currentTab = 1;
+    }
+
+    private void addToPlaylistLibrary(SearchResult result) {
+        MineifyClient.LOGGER.info("Add-to-playlist clicked for: {}", result.title);
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) {
+            client.player.sendMessage(Text.literal("Playlist picker arrives in Batch 3. Use Add to Queue for now."), true);
+        }
     }
 
     private void removeFromPlaylist(String videoId) {
@@ -416,6 +528,29 @@ public class MineifyScreen extends Screen {
             text = text.substring(0, text.length() - 1);
         }
         return text + "...";
+    }
+
+    private int getQueueIndexFromMouse(double mouseY) {
+        if (playlist.isEmpty()) {
+            return -1;
+        }
+
+        int panelTop = (this.height / 2) - (PANEL_HEIGHT / 2);
+        int listTop = panelTop + 55;
+        int listBottom = getListBottom(panelTop);
+        if (mouseY < listTop) {
+            return 0;
+        }
+        if (mouseY > listBottom) {
+            return playlist.size() - 1;
+        }
+
+        int relative = (int) ((mouseY - listTop) / LIST_ITEM_HEIGHT);
+        int index = playlistScrollOffset + relative;
+        if (index < 0) {
+            return 0;
+        }
+        return Math.min(index, playlist.size() - 1);
     }
 
     @Override

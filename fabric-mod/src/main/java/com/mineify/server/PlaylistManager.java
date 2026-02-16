@@ -143,6 +143,29 @@ public class PlaylistManager {
         }
     }
 
+    public void handleQueueReorder(ServerPlayerEntity player, int fromIndex, int toIndex) {
+        int size = playlist.size();
+        if (fromIndex < 0 || toIndex < 0 || fromIndex >= size || toIndex >= size || fromIndex == toIndex) {
+            return;
+        }
+
+        PlaylistSyncPacket.Entry moved = playlist.remove(fromIndex);
+        playlist.add(toIndex, moved);
+
+        if (isPlaying && currentIndex >= 0) {
+            if (currentIndex == fromIndex) {
+                currentIndex = toIndex;
+            } else if (fromIndex < currentIndex && toIndex >= currentIndex) {
+                currentIndex--;
+            } else if (fromIndex > currentIndex && toIndex <= currentIndex) {
+                currentIndex++;
+            }
+        }
+
+        Mineify.LOGGER.info("Player {} reordered queue: {} -> {}", player.getName().getString(), fromIndex, toIndex);
+        syncToAll();
+    }
+
     public void syncToPlayer(ServerPlayerEntity player) {
         ServerPlayNetworking.send(player, new PlaylistSyncPacket(new ArrayList<>(playlist)));
         if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {

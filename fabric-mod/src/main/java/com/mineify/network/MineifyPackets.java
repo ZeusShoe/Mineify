@@ -4,6 +4,7 @@ import com.mineify.Mineify;
 import com.mineify.network.packets.AddToPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
+import com.mineify.network.packets.ReorderQueuePacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -16,6 +17,7 @@ public class MineifyPackets {
         PayloadTypeRegistry.playC2S().register(AddToPlaylistPacket.ID, AddToPlaylistPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(RemoveFromPlaylistPacket.ID, RemoveFromPlaylistPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(PlaybackControlPacket.ID, PlaybackControlPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(ReorderQueuePacket.ID, ReorderQueuePacket.CODEC);
 
         // Register S2C (server-to-client) packet types
         PayloadTypeRegistry.playS2C().register(
@@ -72,6 +74,15 @@ public class MineifyPackets {
                 var manager = Mineify.getPlaylistManager();
                 if (manager != null) {
                     manager.handlePlaybackControl(context.player(), payload.action());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(ReorderQueuePacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleQueueReorder(context.player(), payload.fromIndex(), payload.toIndex());
                 }
             });
         });
