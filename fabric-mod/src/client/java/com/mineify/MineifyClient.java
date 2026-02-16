@@ -8,6 +8,7 @@ import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
+import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -31,6 +32,7 @@ public class MineifyClient implements ClientModInitializer {
     private static long cachedElapsedMs = 0;
     private static long cachedDurationMs = 0;
     private static boolean cachedPaused = false;
+    private static List<MineifyScreen.UserPlaylistSummary> cachedUserPlaylists = new ArrayList<>();
 
     public static List<MineifyScreen.PlaylistEntry> getCachedPlaylist() {
         return new ArrayList<>(cachedPlaylist);
@@ -54,6 +56,10 @@ public class MineifyClient implements ClientModInitializer {
 
     public static boolean isCachedPaused() {
         return cachedPaused;
+    }
+
+    public static List<MineifyScreen.UserPlaylistSummary> getCachedUserPlaylists() {
+        return new ArrayList<>(cachedUserPlaylists);
     }
 
     @Override
@@ -124,6 +130,25 @@ public class MineifyClient implements ClientModInitializer {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(UserPlaylistsSyncPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                List<MineifyScreen.UserPlaylistSummary> entries = new ArrayList<>();
+                for (var playlist : payload.playlists()) {
+                    entries.add(new MineifyScreen.UserPlaylistSummary(
+                            playlist.id(),
+                            playlist.name(),
+                            playlist.isPublic(),
+                            playlist.trackCount()
+                    ));
+                }
+                cachedUserPlaylists = entries;
+
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.updateUserPlaylists(entries);
+                }
+            });
+        });
+
         // Play audio when server sends PlayAudioPacket
         ClientPlayNetworking.registerGlobalReceiver(PlayAudioPacket.ID, (payload, context) -> {
             long packetReceivedAtNanos = System.nanoTime();
@@ -164,6 +189,7 @@ public class MineifyClient implements ClientModInitializer {
             cachedDurationMs = 0;
             cachedPaused = false;
             cachedPlaylist = new ArrayList<>();
+            cachedUserPlaylists = new ArrayList<>();
         });
     }
 }

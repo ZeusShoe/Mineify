@@ -3,8 +3,11 @@ package com.mineify.client;
 import com.mineify.MineifyClient;
 import com.mineify.client.audio.AudioPlayer;
 import com.mineify.network.packets.AddToPlaylistPacket;
+import com.mineify.network.packets.AddToUserPlaylistPacket;
+import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
+import com.mineify.network.packets.RequestUserPlaylistsPacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
 import net.fabricmc.api.EnvType;
@@ -36,15 +39,22 @@ public class MineifyScreen extends Screen {
     private static final int SEARCH_PLAYLIST_BUTTON_WIDTH = 56;
     private static final int SEARCH_QUEUE_BUTTON_WIDTH = 48;
     private static final int SEARCH_BUTTON_GAP = 4;
+    private static final int MODAL_WIDTH = 220;
+    private static final int MODAL_HEIGHT = 140;
 
     private TextFieldWidget searchField;
     private ButtonWidget searchButton;
     private ButtonWidget pauseResumeButton;
     private ButtonWidget skipButton;
     private SliderWidget volumeSlider;
+    private TextFieldWidget newPlaylistNameField;
+    private ButtonWidget playlistPrivacyButton;
+    private ButtonWidget createPlaylistButton;
+    private ButtonWidget cancelCreatePlaylistButton;
 
     private List<SearchResult> searchResults = new ArrayList<>();
     private List<PlaylistEntry> playlist = new ArrayList<>();
+    private List<UserPlaylistSummary> userPlaylists = new ArrayList<>();
 
     private int currentTab = 0;
     private int searchScrollOffset = 0;
@@ -58,6 +68,10 @@ public class MineifyScreen extends Screen {
     private boolean queueDragActive = false;
     private int queueDragFromIndex = -1;
     private int queueDragTargetIndex = -1;
+    private boolean showPlaylistPicker = false;
+    private boolean showCreatePlaylistDialog = false;
+    private SearchResult pendingPlaylistSearchResult = null;
+    private boolean newPlaylistPublic = true;
 
     private String currentPlayerName;
 
@@ -136,8 +150,49 @@ public class MineifyScreen extends Screen {
         };
         this.addDrawableChild(this.volumeSlider);
 
+        int modalLeft = centerX - (MODAL_WIDTH / 2);
+        int modalTop = centerY - (MODAL_HEIGHT / 2);
+
+        this.newPlaylistNameField = new TextFieldWidget(
+                this.textRenderer,
+                modalLeft + 12,
+                modalTop + 35,
+                MODAL_WIDTH - 24,
+                18,
+                Text.literal("Playlist name")
+        );
+        this.newPlaylistNameField.setMaxLength(50);
+        this.newPlaylistNameField.setPlaceholder(Text.literal("My Playlist"));
+        this.newPlaylistNameField.visible = false;
+        this.newPlaylistNameField.setEditable(false);
+        this.addDrawableChild(this.newPlaylistNameField);
+
+        this.playlistPrivacyButton = ButtonWidget.builder(Text.literal("Privacy: Public"), button -> {
+            newPlaylistPublic = !newPlaylistPublic;
+            updateCreatePlaylistControls();
+        }).dimensions(modalLeft + 12, modalTop + 60, MODAL_WIDTH - 24, 20).build();
+        this.playlistPrivacyButton.visible = false;
+        this.playlistPrivacyButton.active = false;
+        this.addDrawableChild(this.playlistPrivacyButton);
+
+        this.createPlaylistButton = ButtonWidget.builder(Text.literal("Create"), button -> createPlaylistFromDialog())
+                .dimensions(modalLeft + 12, modalTop + MODAL_HEIGHT - 28, 92, 20)
+                .build();
+        this.createPlaylistButton.visible = false;
+        this.createPlaylistButton.active = false;
+        this.addDrawableChild(this.createPlaylistButton);
+
+        this.cancelCreatePlaylistButton = ButtonWidget.builder(Text.literal("Cancel"), button -> closeCreatePlaylistDialog())
+                .dimensions(modalLeft + MODAL_WIDTH - 104, modalTop + MODAL_HEIGHT - 28, 92, 20)
+                .build();
+        this.cancelCreatePlaylistButton.visible = false;
+        this.cancelCreatePlaylistButton.active = false;
+        this.addDrawableChild(this.cancelCreatePlaylistButton);
+
         requestPlaylistSync();
+        requestUserPlaylistSync();
         updateControlButtons();
+        updateCreatePlaylistControls();
     }
 
     @Override
@@ -165,6 +220,7 @@ public class MineifyScreen extends Screen {
         }
 
         renderNowPlaying(context, panelLeft, panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING));
+        renderPlaylistModals(context, mouseX, mouseY);
     }
 
     private int getListBottom(int panelTop) {
@@ -324,8 +380,122 @@ public class MineifyScreen extends Screen {
         return String.format("%02d:%02d", minutes, seconds);
     }
 
+    private void renderPlaylistModals(DrawContext context, int mouseX, int mouseY) {
+        if (!showPlaylistPicker && !showCreatePlaylistDialog) {
+            return;
+        }
+
+        context.fill(0, 0, this.width, this.height, 0x88000000);
+
+        if (showPlaylistPicker) {
+            renderPlaylistPicker(context, mouseX, mouseY);
+        }
+        if (showCreatePlaylistDialog) {
+            renderCreatePlaylistDialog(context);
+        }
+    }
+
+    private void renderPlaylistPicker(DrawContext context, int mouseX, int mouseY) {
+        int left = (this.width / 2) - (MODAL_WIDTH / 2);
+        int top = (this.height / 2) - (MODAL_HEIGHT / 2);
+        int right = left + MODAL_WIDTH;
+        int bottom = top + MODAL_HEIGHT;
+
+        context.fill(left, top, right, bottom, 0xF0101010);
+        context.drawHorizontalLine(left, right - 1, top, 0xFF888888);
+        context.drawHorizontalLine(left, right - 1, bottom - 1, 0xFF555555);
+        context.drawVerticalLine(left, top, bottom - 1, 0xFF888888);
+        context.drawVerticalLine(right - 1, top, bottom - 1, 0xFF555555);
+        context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Add to Playlist"), this.width / 2, top + 8, 0xFFFFFFFF);
+
+        int rowY = top + 28;
+        int rowHeight = 18;
+        context.fill(left + 12, rowY, right - 12, rowY + rowHeight, 0x663366FF);
+        context.drawTextWithShadow(this.textRenderer, Text.literal("+ New Playlist"), left + 18, rowY + 5, 0xFFFFFFFF);
+
+        rowY += rowHeight + 4;
+        if (userPlaylists.isEmpty()) {
+            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("No playlists yet"), this.width / 2, rowY + 6, 0xFFAAAAAA);
+            return;
+        }
+
+        int maxRows = 4;
+        for (int i = 0; i < userPlaylists.size() && i < maxRows; i++) {
+            UserPlaylistSummary summary = userPlaylists.get(i);
+            boolean hovered = mouseX >= left + 12 && mouseX <= right - 12 && mouseY >= rowY && mouseY <= rowY + rowHeight;
+            context.fill(left + 12, rowY, right - 12, rowY + rowHeight, hovered ? 0x6644AA44 : 0x4422AA22);
+
+            String privacy = summary.isPublic ? "Public" : "Private";
+            String label = truncateText(summary.name, 110);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(label), left + 16, rowY + 5, 0xFFFFFFFF);
+            context.drawTextWithShadow(
+                    this.textRenderer,
+                    Text.literal(privacy + " - " + summary.trackCount + " tracks"),
+                    left + 124,
+                    rowY + 5,
+                    0xFFBBBBBB
+            );
+            rowY += rowHeight + 3;
+        }
+    }
+
+    private void renderCreatePlaylistDialog(DrawContext context) {
+        int left = (this.width / 2) - (MODAL_WIDTH / 2);
+        int top = (this.height / 2) - (MODAL_HEIGHT / 2);
+        int right = left + MODAL_WIDTH;
+        int bottom = top + MODAL_HEIGHT;
+
+        context.fill(left, top, right, bottom, 0xF0101010);
+        context.drawHorizontalLine(left, right - 1, top, 0xFFAAAAAA);
+        context.drawHorizontalLine(left, right - 1, bottom - 1, 0xFF666666);
+        context.drawVerticalLine(left, top, bottom - 1, 0xFFAAAAAA);
+        context.drawVerticalLine(right - 1, top, bottom - 1, 0xFF666666);
+        context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("New Playlist"), this.width / 2, top + 8, 0xFFFFFFFF);
+    }
+
     @Override
     public boolean mouseClicked(Click click, boolean doubled) {
+        if (showCreatePlaylistDialog) {
+            return super.mouseClicked(click, doubled);
+        }
+
+        if (showPlaylistPicker) {
+            if (click.button() != 0) {
+                return true;
+            }
+
+            double mouseX = click.x();
+            double mouseY = click.y();
+
+            int left = (this.width / 2) - (MODAL_WIDTH / 2);
+            int top = (this.height / 2) - (MODAL_HEIGHT / 2);
+            int right = left + MODAL_WIDTH;
+            int bottom = top + MODAL_HEIGHT;
+
+            if (mouseX < left || mouseX > right || mouseY < top || mouseY > bottom) {
+                closePlaylistPicker();
+                return true;
+            }
+
+            int rowY = top + 28;
+            int rowHeight = 18;
+            if (mouseX >= left + 12 && mouseX <= right - 12 && mouseY >= rowY && mouseY <= rowY + rowHeight) {
+                openCreatePlaylistDialog();
+                return true;
+            }
+
+            rowY += rowHeight + 4;
+            for (int i = 0; i < userPlaylists.size() && i < 4; i++) {
+                if (mouseX >= left + 12 && mouseX <= right - 12 && mouseY >= rowY && mouseY <= rowY + rowHeight) {
+                    addSearchResultToUserPlaylist(userPlaylists.get(i));
+                    closePlaylistPicker();
+                    return true;
+                }
+                rowY += rowHeight + 3;
+            }
+            return true;
+        }
+
         if (click.button() == 0) {
             double mouseX = click.x();
             double mouseY = click.y();
@@ -424,6 +594,9 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (showPlaylistPicker || showCreatePlaylistDialog) {
+            return true;
+        }
         if (queueDragActive) {
             return true;
         }
@@ -438,6 +611,18 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean keyPressed(KeyInput input) {
+        if (showCreatePlaylistDialog && input.key() == GLFW.GLFW_KEY_ENTER) {
+            createPlaylistFromDialog();
+            return true;
+        }
+        if ((showPlaylistPicker || showCreatePlaylistDialog) && input.key() == GLFW.GLFW_KEY_ESCAPE) {
+            if (showCreatePlaylistDialog) {
+                closeCreatePlaylistDialog();
+            } else {
+                closePlaylistPicker();
+            }
+            return true;
+        }
         if (input.key() == GLFW.GLFW_KEY_ENTER && this.searchField.isFocused()) {
             performSearch();
             return true;
@@ -465,11 +650,11 @@ public class MineifyScreen extends Screen {
     }
 
     private void addToPlaylistLibrary(SearchResult result) {
-        MineifyClient.LOGGER.info("Add-to-playlist clicked for: {}", result.title);
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player != null) {
-            client.player.sendMessage(Text.literal("Playlist picker arrives in Batch 3. Use Add to Queue for now."), true);
-        }
+        MineifyClient.LOGGER.info("Opening playlist picker for: {}", result.title);
+        this.pendingPlaylistSearchResult = result;
+        this.showPlaylistPicker = true;
+        this.showCreatePlaylistDialog = false;
+        updateCreatePlaylistControls();
     }
 
     private void removeFromPlaylist(String videoId) {
@@ -484,6 +669,11 @@ public class MineifyScreen extends Screen {
         this.playbackElapsedMs = MineifyClient.getCachedElapsedMs();
         this.playbackDurationMs = MineifyClient.getCachedDurationMs();
         this.playbackPaused = MineifyClient.isCachedPaused();
+        this.userPlaylists = MineifyClient.getCachedUserPlaylists();
+    }
+
+    private void requestUserPlaylistSync() {
+        ClientPlayNetworking.send(new RequestUserPlaylistsPacket());
     }
 
     public void updateSearchResults(List<SearchResult> results) {
@@ -493,6 +683,10 @@ public class MineifyScreen extends Screen {
 
     public void updatePlaylist(List<PlaylistEntry> entries) {
         this.playlist = entries;
+    }
+
+    public void updateUserPlaylists(List<UserPlaylistSummary> entries) {
+        this.userPlaylists = entries;
     }
 
     public void updateNowPlaying(String title, float progress, long elapsedMs, long durationMs, boolean paused) {
@@ -553,6 +747,87 @@ public class MineifyScreen extends Screen {
         return Math.min(index, playlist.size() - 1);
     }
 
+    private void closePlaylistPicker() {
+        showPlaylistPicker = false;
+        pendingPlaylistSearchResult = null;
+    }
+
+    private void openCreatePlaylistDialog() {
+        showCreatePlaylistDialog = true;
+        showPlaylistPicker = false;
+        newPlaylistPublic = true;
+        if (newPlaylistNameField != null) {
+            newPlaylistNameField.setText("");
+            newPlaylistNameField.setEditable(true);
+            newPlaylistNameField.visible = true;
+            this.setFocused(newPlaylistNameField);
+        }
+        updateCreatePlaylistControls();
+    }
+
+    private void closeCreatePlaylistDialog() {
+        showCreatePlaylistDialog = false;
+        pendingPlaylistSearchResult = null;
+        if (newPlaylistNameField != null) {
+            newPlaylistNameField.setEditable(false);
+            newPlaylistNameField.visible = false;
+        }
+        updateCreatePlaylistControls();
+    }
+
+    private void updateCreatePlaylistControls() {
+        boolean dialogVisible = showCreatePlaylistDialog;
+
+        if (playlistPrivacyButton != null) {
+            playlistPrivacyButton.visible = dialogVisible;
+            playlistPrivacyButton.active = dialogVisible;
+            playlistPrivacyButton.setMessage(Text.literal(newPlaylistPublic ? "Privacy: Public" : "Privacy: Private"));
+        }
+        if (createPlaylistButton != null) {
+            createPlaylistButton.visible = dialogVisible;
+            createPlaylistButton.active = dialogVisible;
+        }
+        if (cancelCreatePlaylistButton != null) {
+            cancelCreatePlaylistButton.visible = dialogVisible;
+            cancelCreatePlaylistButton.active = dialogVisible;
+        }
+    }
+
+    private void createPlaylistFromDialog() {
+        if (!showCreatePlaylistDialog || pendingPlaylistSearchResult == null || newPlaylistNameField == null) {
+            return;
+        }
+        String name = newPlaylistNameField.getText().trim();
+        if (name.isEmpty()) {
+            return;
+        }
+
+        ClientPlayNetworking.send(new CreateUserPlaylistPacket(
+                name,
+                newPlaylistPublic,
+                true,
+                pendingPlaylistSearchResult.videoId,
+                pendingPlaylistSearchResult.title,
+                pendingPlaylistSearchResult.duration
+        ));
+
+        closeCreatePlaylistDialog();
+        pendingPlaylistSearchResult = null;
+        requestUserPlaylistSync();
+    }
+
+    private void addSearchResultToUserPlaylist(UserPlaylistSummary playlistSummary) {
+        if (pendingPlaylistSearchResult == null) {
+            return;
+        }
+        ClientPlayNetworking.send(new AddToUserPlaylistPacket(
+                playlistSummary.id,
+                pendingPlaylistSearchResult.videoId,
+                pendingPlaylistSearchResult.title,
+                pendingPlaylistSearchResult.duration
+        ));
+    }
+
     @Override
     public boolean shouldPause() {
         return false;
@@ -585,6 +860,20 @@ public class MineifyScreen extends Screen {
             this.title = title;
             this.duration = duration;
             this.addedBy = addedBy;
+        }
+    }
+
+    public static class UserPlaylistSummary {
+        public final String id;
+        public final String name;
+        public final boolean isPublic;
+        public final int trackCount;
+
+        public UserPlaylistSummary(String id, String name, boolean isPublic, int trackCount) {
+            this.id = id;
+            this.name = name;
+            this.isPublic = isPublic;
+            this.trackCount = trackCount;
         }
     }
 }

@@ -1,27 +1,43 @@
 package com.mineify.server;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.reflect.TypeToken;
 import com.mineify.Mineify;
 import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
+import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 public class PlaylistManager {
     private final MinecraftServer server;
     private final CompanionClient companionClient;
+    private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final List<PlaylistSyncPacket.Entry> playlist = new CopyOnWriteArrayList<>();
+    private final Map<String, List<UserPlaylist>> userPlaylistsByOwner = new HashMap<>();
+    private final Path userPlaylistsFile;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "Mineify-Scheduler");
         t.setDaemon(true);
@@ -41,6 +57,10 @@ public class PlaylistManager {
     public PlaylistManager(MinecraftServer server, CompanionClient companionClient) {
         this.server = server;
         this.companionClient = companionClient;
+        this.userPlaylistsFile = server.getRunDirectory()
+                .resolve("MineifyCompanion")
+                .resolve("playlists.json");
+        loadUserPlaylists();
 
         this.progressFuture = scheduler.scheduleAtFixedRate(() -> {
             if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
@@ -166,6 +186,66 @@ public class PlaylistManager {
         syncToAll();
     }
 
+    public void handleRequestUserPlaylists(ServerPlayerEntity player) {
+        syncUserPlaylistsToPlayer(player);
+    }
+
+    public void handleCreateUserPlaylist(
+            ServerPlayerEntity player,
+            String name,
+            boolean isPublic,
+            boolean addInitialTrack,
+            String videoId,
+            String title,
+            String duration
+    ) {
+        String trimmedName = name == null ? "" : name.trim();
+        if (trimmedName.isEmpty()) {
+            return;
+        }
+        if (trimmedName.length() > 50) {
+            trimmedName = trimmedName.substring(0, 50);
+        }
+
+        List<UserPlaylist> userPlaylists = userPlaylistsByOwner.computeIfAbsent(player.getUuidAsString(), key -> new ArrayList<>());
+        UserPlaylist playlistModel = new UserPlaylist(UUID.randomUUID().toString(), trimmedName, isPublic);
+        if (addInitialTrack && videoId != null && !videoId.isBlank()) {
+            playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
+        }
+        userPlaylists.add(playlistModel);
+
+        saveUserPlaylists();
+        syncUserPlaylistsToPlayer(player);
+    }
+
+    public void handleAddToUserPlaylist(
+            ServerPlayerEntity player,
+            String playlistId,
+            String videoId,
+            String title,
+            String duration
+    ) {
+        if (playlistId == null || playlistId.isBlank() || videoId == null || videoId.isBlank()) {
+            return;
+        }
+
+        List<UserPlaylist> userPlaylists = userPlaylistsByOwner.get(player.getUuidAsString());
+        if (userPlaylists == null) {
+            return;
+        }
+
+        for (UserPlaylist playlistModel : userPlaylists) {
+            if (!playlistModel.id.equals(playlistId)) {
+                continue;
+            }
+
+            playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
+            saveUserPlaylists();
+            syncUserPlaylistsToPlayer(player);
+            return;
+        }
+    }
+
     public void syncToPlayer(ServerPlayerEntity player) {
         ServerPlayNetworking.send(player, new PlaylistSyncPacket(new ArrayList<>(playlist)));
         if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
@@ -184,6 +264,7 @@ public class PlaylistManager {
 
             ServerPlayNetworking.send(player, new PlaybackStatePacket(paused));
         }
+        syncUserPlaylistsToPlayer(player);
     }
 
     private void playNext() {
@@ -321,6 +402,50 @@ public class PlaylistManager {
         }
     }
 
+    private void syncUserPlaylistsToPlayer(ServerPlayerEntity player) {
+        List<UserPlaylist> playlists = userPlaylistsByOwner.getOrDefault(player.getUuidAsString(), List.of());
+        List<UserPlaylistsSyncPacket.Entry> entries = new ArrayList<>(playlists.size());
+        for (UserPlaylist playlistModel : playlists) {
+            entries.add(new UserPlaylistsSyncPacket.Entry(
+                    playlistModel.id,
+                    playlistModel.name,
+                    playlistModel.isPublic,
+                    playlistModel.tracks.size()
+            ));
+        }
+        ServerPlayNetworking.send(player, new UserPlaylistsSyncPacket(entries));
+    }
+
+    private void loadUserPlaylists() {
+        if (!Files.exists(userPlaylistsFile)) {
+            return;
+        }
+
+        try (Reader reader = Files.newBufferedReader(userPlaylistsFile)) {
+            Type type = new TypeToken<Map<String, List<UserPlaylist>>>() {
+            }.getType();
+            Map<String, List<UserPlaylist>> loaded = gson.fromJson(reader, type);
+            userPlaylistsByOwner.clear();
+            if (loaded != null) {
+                userPlaylistsByOwner.putAll(loaded);
+            }
+            Mineify.LOGGER.info("Loaded {} user playlist groups", userPlaylistsByOwner.size());
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Failed to load user playlists from {}", userPlaylistsFile, e);
+        }
+    }
+
+    private void saveUserPlaylists() {
+        try {
+            Files.createDirectories(userPlaylistsFile.getParent());
+            try (Writer writer = Files.newBufferedWriter(userPlaylistsFile)) {
+                gson.toJson(userPlaylistsByOwner, writer);
+            }
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Failed to save user playlists to {}", userPlaylistsFile, e);
+        }
+    }
+
     private long parseDuration(String duration) {
         if (duration == null || duration.isEmpty()) {
             return 3 * 60 * 1000;
@@ -355,8 +480,40 @@ public class PlaylistManager {
         if (progressFuture != null) {
             progressFuture.cancel(true);
         }
+        saveUserPlaylists();
         scheduler.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
+    }
+
+    private static class UserPlaylist {
+        String id;
+        String name;
+        boolean isPublic;
+        List<UserPlaylistTrack> tracks = new ArrayList<>();
+
+        UserPlaylist() {
+        }
+
+        UserPlaylist(String id, String name, boolean isPublic) {
+            this.id = id;
+            this.name = name;
+            this.isPublic = isPublic;
+        }
+    }
+
+    private static class UserPlaylistTrack {
+        String videoId;
+        String title;
+        String duration;
+
+        UserPlaylistTrack() {
+        }
+
+        UserPlaylistTrack(String videoId, String title, String duration) {
+            this.videoId = videoId;
+            this.title = title;
+            this.duration = duration;
+        }
     }
 }
