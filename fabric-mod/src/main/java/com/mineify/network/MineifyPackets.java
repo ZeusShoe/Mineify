@@ -6,7 +6,9 @@ import com.mineify.network.packets.AddToUserPlaylistPacket;
 import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
+import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
+import com.mineify.network.packets.RequestProfilesPacket;
 import com.mineify.network.packets.RequestUserPlaylistsPacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
@@ -25,6 +27,7 @@ public class MineifyPackets {
         PayloadTypeRegistry.playC2S().register(RequestUserPlaylistsPacket.ID, RequestUserPlaylistsPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(CreateUserPlaylistPacket.ID, CreateUserPlaylistPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(AddToUserPlaylistPacket.ID, AddToUserPlaylistPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(RequestProfilesPacket.ID, RequestProfilesPacket.CODEC);
 
         // Register S2C (server-to-client) packet types
         PayloadTypeRegistry.playS2C().register(
@@ -50,6 +53,10 @@ public class MineifyPackets {
         PayloadTypeRegistry.playS2C().register(
                 UserPlaylistsSyncPacket.ID,
                 UserPlaylistsSyncPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                ProfilesSyncPacket.ID,
+                ProfilesSyncPacket.CODEC
         );
 
         // Register server-side handlers
@@ -135,6 +142,15 @@ public class MineifyPackets {
                             payload.title(),
                             payload.duration()
                     );
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(RequestProfilesPacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleRequestProfiles(context.player(), payload.query());
                 }
             });
         });

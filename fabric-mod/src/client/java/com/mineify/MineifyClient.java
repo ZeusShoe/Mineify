@@ -7,6 +7,7 @@ import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
+import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.api.ClientModInitializer;
@@ -33,6 +34,7 @@ public class MineifyClient implements ClientModInitializer {
     private static long cachedDurationMs = 0;
     private static boolean cachedPaused = false;
     private static List<MineifyScreen.UserPlaylistSummary> cachedUserPlaylists = new ArrayList<>();
+    private static List<MineifyScreen.ProfileSummary> cachedProfiles = new ArrayList<>();
 
     public static List<MineifyScreen.PlaylistEntry> getCachedPlaylist() {
         return new ArrayList<>(cachedPlaylist);
@@ -60,6 +62,10 @@ public class MineifyClient implements ClientModInitializer {
 
     public static List<MineifyScreen.UserPlaylistSummary> getCachedUserPlaylists() {
         return new ArrayList<>(cachedUserPlaylists);
+    }
+
+    public static List<MineifyScreen.ProfileSummary> getCachedProfiles() {
+        return new ArrayList<>(cachedProfiles);
     }
 
     @Override
@@ -149,6 +155,34 @@ public class MineifyClient implements ClientModInitializer {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(ProfilesSyncPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                List<MineifyScreen.ProfileSummary> profiles = new ArrayList<>();
+                for (var profile : payload.profiles()) {
+                    List<MineifyScreen.UserPlaylistSummary> summaries = new ArrayList<>();
+                    for (var playlist : profile.playlists()) {
+                        summaries.add(new MineifyScreen.UserPlaylistSummary(
+                                playlist.id(),
+                                playlist.name(),
+                                playlist.isPublic(),
+                                playlist.trackCount()
+                        ));
+                    }
+                    profiles.add(new MineifyScreen.ProfileSummary(
+                            profile.ownerId(),
+                            profile.ownerName(),
+                            profile.isSelf(),
+                            summaries
+                    ));
+                }
+                cachedProfiles = profiles;
+
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.updateProfiles(profiles);
+                }
+            });
+        });
+
         // Play audio when server sends PlayAudioPacket
         ClientPlayNetworking.registerGlobalReceiver(PlayAudioPacket.ID, (payload, context) -> {
             long packetReceivedAtNanos = System.nanoTime();
@@ -190,6 +224,7 @@ public class MineifyClient implements ClientModInitializer {
             cachedPaused = false;
             cachedPlaylist = new ArrayList<>();
             cachedUserPlaylists = new ArrayList<>();
+            cachedProfiles = new ArrayList<>();
         });
     }
 }

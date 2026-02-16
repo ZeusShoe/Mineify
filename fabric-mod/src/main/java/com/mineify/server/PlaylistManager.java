@@ -8,6 +8,7 @@ import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
+import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
@@ -190,6 +192,49 @@ public class PlaylistManager {
         syncUserPlaylistsToPlayer(player);
     }
 
+    public void handleRequestProfiles(ServerPlayerEntity player, String query) {
+        String normalizedQuery = query == null ? "" : query.toLowerCase(Locale.ROOT).trim();
+        List<ProfilesSyncPacket.ProfileEntry> entries = new ArrayList<>();
+        String selfId = player.getUuidAsString();
+
+        List<UserPlaylist> selfPlaylists = userPlaylistsByOwner.getOrDefault(selfId, List.of());
+        entries.add(new ProfilesSyncPacket.ProfileEntry(
+                selfId,
+                player.getName().getString(),
+                true,
+                toProfilePlaylistEntries(selfPlaylists, true)
+        ));
+
+        for (Map.Entry<String, List<UserPlaylist>> entry : userPlaylistsByOwner.entrySet()) {
+            String ownerId = entry.getKey();
+            if (ownerId.equals(selfId)) {
+                continue;
+            }
+
+            List<UserPlaylist> ownerPlaylists = entry.getValue();
+            List<ProfilesSyncPacket.PlaylistEntry> publicPlaylists = toProfilePlaylistEntries(ownerPlaylists, false);
+            if (publicPlaylists.isEmpty()) {
+                continue;
+            }
+
+            String ownerName = resolveOwnerName(ownerId, ownerPlaylists);
+            if (!normalizedQuery.isEmpty() && !ownerName.toLowerCase(Locale.ROOT).contains(normalizedQuery)) {
+                continue;
+            }
+
+            entries.add(new ProfilesSyncPacket.ProfileEntry(ownerId, ownerName, false, publicPlaylists));
+        }
+
+        entries.sort((a, b) -> {
+            if (a.isSelf() != b.isSelf()) {
+                return a.isSelf() ? -1 : 1;
+            }
+            return a.ownerName().compareToIgnoreCase(b.ownerName());
+        });
+
+        ServerPlayNetworking.send(player, new ProfilesSyncPacket(entries));
+    }
+
     public void handleCreateUserPlaylist(
             ServerPlayerEntity player,
             String name,
@@ -208,7 +253,13 @@ public class PlaylistManager {
         }
 
         List<UserPlaylist> userPlaylists = userPlaylistsByOwner.computeIfAbsent(player.getUuidAsString(), key -> new ArrayList<>());
-        UserPlaylist playlistModel = new UserPlaylist(UUID.randomUUID().toString(), trimmedName, isPublic);
+        UserPlaylist playlistModel = new UserPlaylist(
+                UUID.randomUUID().toString(),
+                player.getUuidAsString(),
+                player.getName().getString(),
+                trimmedName,
+                isPublic
+        );
         if (addInitialTrack && videoId != null && !videoId.isBlank()) {
             playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
         }
@@ -416,6 +467,38 @@ public class PlaylistManager {
         ServerPlayNetworking.send(player, new UserPlaylistsSyncPacket(entries));
     }
 
+    private List<ProfilesSyncPacket.PlaylistEntry> toProfilePlaylistEntries(List<UserPlaylist> playlists, boolean includePrivate) {
+        List<ProfilesSyncPacket.PlaylistEntry> entries = new ArrayList<>();
+        for (UserPlaylist playlistModel : playlists) {
+            if (!includePrivate && !playlistModel.isPublic) {
+                continue;
+            }
+            entries.add(new ProfilesSyncPacket.PlaylistEntry(
+                    playlistModel.id,
+                    playlistModel.name,
+                    playlistModel.isPublic,
+                    playlistModel.tracks.size()
+            ));
+        }
+        return entries;
+    }
+
+    private String resolveOwnerName(String ownerId, List<UserPlaylist> ownerPlaylists) {
+        if (ownerPlaylists != null && !ownerPlaylists.isEmpty()) {
+            String name = ownerPlaylists.get(0).ownerName;
+            if (name != null && !name.isBlank()) {
+                return name;
+            }
+        }
+
+        for (ServerPlayerEntity onlinePlayer : server.getPlayerManager().getPlayerList()) {
+            if (onlinePlayer.getUuidAsString().equals(ownerId)) {
+                return onlinePlayer.getName().getString();
+            }
+        }
+        return ownerId.length() > 8 ? ownerId.substring(0, 8) : ownerId;
+    }
+
     private void loadUserPlaylists() {
         if (!Files.exists(userPlaylistsFile)) {
             return;
@@ -488,6 +571,8 @@ public class PlaylistManager {
 
     private static class UserPlaylist {
         String id;
+        String ownerId;
+        String ownerName;
         String name;
         boolean isPublic;
         List<UserPlaylistTrack> tracks = new ArrayList<>();
@@ -495,8 +580,10 @@ public class PlaylistManager {
         UserPlaylist() {
         }
 
-        UserPlaylist(String id, String name, boolean isPublic) {
+        UserPlaylist(String id, String ownerId, String ownerName, String name, boolean isPublic) {
             this.id = id;
+            this.ownerId = ownerId;
+            this.ownerName = ownerName;
             this.name = name;
             this.isPublic = isPublic;
         }

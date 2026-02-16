@@ -7,6 +7,7 @@ import com.mineify.network.packets.AddToUserPlaylistPacket;
 import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
+import com.mineify.network.packets.RequestProfilesPacket;
 import com.mineify.network.packets.RequestUserPlaylistsPacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
@@ -16,11 +17,13 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.PlayerSkinDrawer;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.SliderWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.input.KeyInput;
+import net.minecraft.client.network.PlayerListEntry;
 import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
 
@@ -29,7 +32,7 @@ import java.util.List;
 
 @Environment(EnvType.CLIENT)
 public class MineifyScreen extends Screen {
-    private static final int PANEL_WIDTH = 300;
+    private static final int PANEL_WIDTH = 430;
     private static final int PANEL_HEIGHT = 245;
     private static final int NOW_PLAYING_HEIGHT = 38;
     private static final int VOLUME_HEIGHT = 20;
@@ -41,6 +44,7 @@ public class MineifyScreen extends Screen {
     private static final int SEARCH_BUTTON_GAP = 4;
     private static final int MODAL_WIDTH = 220;
     private static final int MODAL_HEIGHT = 140;
+    private static final int PLAYLISTS_LEFT_WIDTH = 130;
 
     private TextFieldWidget searchField;
     private ButtonWidget searchButton;
@@ -48,6 +52,7 @@ public class MineifyScreen extends Screen {
     private ButtonWidget skipButton;
     private SliderWidget volumeSlider;
     private TextFieldWidget newPlaylistNameField;
+    private TextFieldWidget profileSearchField;
     private ButtonWidget playlistPrivacyButton;
     private ButtonWidget createPlaylistButton;
     private ButtonWidget cancelCreatePlaylistButton;
@@ -55,10 +60,12 @@ public class MineifyScreen extends Screen {
     private List<SearchResult> searchResults = new ArrayList<>();
     private List<PlaylistEntry> playlist = new ArrayList<>();
     private List<UserPlaylistSummary> userPlaylists = new ArrayList<>();
+    private List<ProfileSummary> profiles = new ArrayList<>();
 
     private int currentTab = 0;
     private int searchScrollOffset = 0;
     private int playlistScrollOffset = 0;
+    private int profileScrollOffset = 0;
 
     private String nowPlaying = null;
     private float playbackProgress = 0f;
@@ -72,6 +79,8 @@ public class MineifyScreen extends Screen {
     private boolean showCreatePlaylistDialog = false;
     private SearchResult pendingPlaylistSearchResult = null;
     private boolean newPlaylistPublic = true;
+    private String selectedProfileId = null;
+    private int playlistsSubtab = 0; // 0: Me, 1: Others, 2: Liked
 
     private String currentPlayerName;
 
@@ -119,6 +128,14 @@ public class MineifyScreen extends Screen {
                 .dimensions(panelLeft + 75, panelTop + 5, 60, 20)
                 .build();
         this.addDrawableChild(playlistTabBtn);
+
+        ButtonWidget playlistsTabBtn = ButtonWidget.builder(Text.literal("Playlists"), button -> {
+                    this.currentTab = 2;
+                    requestProfilesSync(profileSearchField == null ? "" : profileSearchField.getText());
+                })
+                .dimensions(panelLeft + 140, panelTop + 5, 70, 20)
+                .build();
+        this.addDrawableChild(playlistsTabBtn);
 
         this.pauseResumeButton = ButtonWidget.builder(Text.literal("Pause"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket(playbackPaused ? "resume" : "pause"));
@@ -189,8 +206,23 @@ public class MineifyScreen extends Screen {
         this.cancelCreatePlaylistButton.active = false;
         this.addDrawableChild(this.cancelCreatePlaylistButton);
 
+        this.profileSearchField = new TextFieldWidget(
+                this.textRenderer,
+                panelLeft + 10,
+                panelTop + 30,
+                PLAYLISTS_LEFT_WIDTH - 20,
+                18,
+                Text.literal("Search players")
+        );
+        this.profileSearchField.setMaxLength(40);
+        this.profileSearchField.setPlaceholder(Text.literal("Find player..."));
+        this.profileSearchField.visible = false;
+        this.profileSearchField.setEditable(false);
+        this.addDrawableChild(this.profileSearchField);
+
         requestPlaylistSync();
         requestUserPlaylistSync();
+        requestProfilesSync("");
         updateControlButtons();
         updateCreatePlaylistControls();
     }
@@ -211,12 +243,30 @@ public class MineifyScreen extends Screen {
         int titleY = Math.max(4, panelTop - 15);
         context.drawCenteredTextWithShadow(this.textRenderer, this.title, centerX, titleY, 0xFFFFFFFF);
 
+        boolean showSearchControls = currentTab == 0 && !showPlaylistPicker && !showCreatePlaylistDialog;
+        if (searchField != null) {
+            searchField.visible = showSearchControls;
+            searchField.setEditable(showSearchControls);
+        }
+        if (searchButton != null) {
+            searchButton.visible = showSearchControls;
+            searchButton.active = showSearchControls;
+        }
+
+        boolean showProfileSearch = currentTab == 2 && !showPlaylistPicker && !showCreatePlaylistDialog;
+        if (profileSearchField != null) {
+            profileSearchField.visible = showProfileSearch;
+            profileSearchField.setEditable(showProfileSearch);
+        }
+
         super.render(context, mouseX, mouseY, delta);
 
         if (currentTab == 0) {
             renderSearchTab(context, panelLeft, panelTop, mouseX, mouseY);
-        } else {
+        } else if (currentTab == 1) {
             renderPlaylistTab(context, panelLeft, panelTop, mouseX, mouseY);
+        } else {
+            renderProfilesTab(context, panelLeft, panelTop, mouseX, mouseY);
         }
 
         renderNowPlaying(context, panelLeft, panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING));
@@ -344,6 +394,175 @@ public class MineifyScreen extends Screen {
                 y += itemHeight;
             }
         }
+    }
+
+    private void renderProfilesTab(DrawContext context, int panelLeft, int panelTop, int mouseX, int mouseY) {
+        int contentTop = panelTop + 55;
+        int contentBottom = getListBottom(panelTop);
+        int leftPaneRight = panelLeft + PLAYLISTS_LEFT_WIDTH;
+
+        context.fill(panelLeft + 6, contentTop, leftPaneRight, contentBottom, 0x33000000);
+        context.fill(leftPaneRight + 2, contentTop, panelLeft + PANEL_WIDTH - 10, contentBottom, 0x22000000);
+
+        int tabY = contentTop + 4;
+        drawSubtab(context, panelLeft + PLAYLISTS_LEFT_WIDTH + 8, tabY, 36, "Me", playlistsSubtab == 0);
+        drawSubtab(context, panelLeft + PLAYLISTS_LEFT_WIDTH + 48, tabY, 52, "Others", playlistsSubtab == 1);
+        drawSubtab(context, panelLeft + PLAYLISTS_LEFT_WIDTH + 104, tabY, 45, "Liked", playlistsSubtab == 2);
+
+        List<ProfileSummary> visibleProfiles = getFilteredProfiles();
+        int rowY = contentTop + 8;
+        int rowHeight = 22;
+        int drawn = 0;
+        for (int i = profileScrollOffset; i < visibleProfiles.size() && rowY + rowHeight <= contentBottom; i++) {
+            ProfileSummary profile = visibleProfiles.get(i);
+            boolean selected = profile.ownerId.equals(selectedProfileId);
+            boolean hovered = mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= rowY && mouseY <= rowY + rowHeight;
+            int color = selected ? 0x6644AA44 : (hovered ? 0x44444444 : 0x22222222);
+            context.fill(panelLeft + 8, rowY, leftPaneRight - 2, rowY + rowHeight, color);
+
+            renderPlayerHead(context, profile.ownerName, panelLeft + 12, rowY + 3, 16);
+            String name = truncateText(profile.ownerName, PLAYLISTS_LEFT_WIDTH - 44);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(name), panelLeft + 32, rowY + 8, 0xFFFFFFFF);
+
+            rowY += rowHeight + 2;
+            drawn++;
+        }
+
+        if (drawn == 0) {
+            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("No players"), panelLeft + (PLAYLISTS_LEFT_WIDTH / 2), contentTop + 24, 0xFF888888);
+        }
+
+        ProfileSummary selected = getSelectedProfile();
+        int detailsLeft = leftPaneRight + 8;
+        if (selected == null) {
+            context.drawTextWithShadow(this.textRenderer, Text.literal("Select a player profile"), detailsLeft, contentTop + 24, 0xFF999999);
+            return;
+        }
+
+        String header = selected.ownerName + (selected.isSelf ? " (You)" : "");
+        context.drawTextWithShadow(this.textRenderer, Text.literal(header), detailsLeft, contentTop + 26, 0xFFFFFFFF);
+        if (selected.isSelf) {
+            context.drawTextWithShadow(this.textRenderer, Text.literal("Editable playlists"), detailsLeft, contentTop + 38, 0xFF77FF77);
+        }
+
+        List<UserPlaylistSummary> filteredPlaylists = filterPlaylistsForSubtab(selected);
+        int py = contentTop + 52;
+        for (int i = 0; i < filteredPlaylists.size() && py + 18 <= contentBottom; i++) {
+            UserPlaylistSummary summary = filteredPlaylists.get(i);
+            context.fill(detailsLeft, py, panelLeft + PANEL_WIDTH - 14, py + 18, 0x33222222);
+            String privacy = summary.isPublic ? "Public" : "Private";
+            context.drawTextWithShadow(
+                    this.textRenderer,
+                    Text.literal(truncateText(summary.name, 150) + " - " + summary.trackCount + " tracks - " + privacy),
+                    detailsLeft + 4,
+                    py + 5,
+                    0xFFFFFFFF
+            );
+            py += 21;
+        }
+
+        if (filteredPlaylists.isEmpty()) {
+            context.drawTextWithShadow(this.textRenderer, Text.literal("No playlists in this section"), detailsLeft, contentTop + 58, 0xFF888888);
+        }
+    }
+
+    private void drawSubtab(DrawContext context, int x, int y, int width, String label, boolean active) {
+        context.fill(x, y, x + width, y + 16, active ? 0x8844AA44 : 0x33444444);
+        context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(label), x + (width / 2), y + 4, 0xFFFFFFFF);
+    }
+
+    private void renderPlayerHead(DrawContext context, String playerName, int x, int y, int size) {
+        PlayerListEntry entry = findPlayerListEntry(playerName);
+        if (entry != null) {
+            PlayerSkinDrawer.draw(context, entry.getSkinTextures(), x, y, size);
+            return;
+        }
+
+        context.fill(x, y, x + size, y + size, 0x88444444);
+        String initial = playerName == null || playerName.isEmpty() ? "?" : playerName.substring(0, 1).toUpperCase();
+        context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(initial), x + (size / 2), y + 4, 0xFFFFFFFF);
+    }
+
+    private PlayerListEntry findPlayerListEntry(String playerName) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.player.networkHandler == null) {
+            return null;
+        }
+
+        for (PlayerListEntry entry : client.player.networkHandler.getPlayerList()) {
+            if (entry.getProfile().name().equalsIgnoreCase(playerName)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private ProfileSummary getSelectedProfile() {
+        if (selectedProfileId == null) {
+            return null;
+        }
+        for (ProfileSummary profile : profiles) {
+            if (profile.ownerId.equals(selectedProfileId)) {
+                return profile;
+            }
+        }
+        return null;
+    }
+
+    private List<ProfileSummary> getFilteredProfiles() {
+        String query = profileSearchField == null ? "" : profileSearchField.getText().trim().toLowerCase();
+        List<ProfileSummary> filtered = new ArrayList<>();
+        for (ProfileSummary profile : profiles) {
+            if (query.isEmpty() || profile.ownerName.toLowerCase().contains(query)) {
+                filtered.add(profile);
+            }
+        }
+        filtered.sort((a, b) -> {
+            if (a.isSelf != b.isSelf) {
+                return a.isSelf ? -1 : 1;
+            }
+            return a.ownerName.compareToIgnoreCase(b.ownerName);
+        });
+        return filtered;
+    }
+
+    private List<UserPlaylistSummary> filterPlaylistsForSubtab(ProfileSummary profile) {
+        if (playlistsSubtab == 2) {
+            return new ArrayList<>();
+        }
+
+        List<UserPlaylistSummary> filtered = new ArrayList<>();
+        for (UserPlaylistSummary summary : profile.playlists) {
+            if (playlistsSubtab == 0 && !profile.isSelf) {
+                continue;
+            }
+            if (playlistsSubtab == 1 && profile.isSelf) {
+                continue;
+            }
+            filtered.add(summary);
+        }
+        return filtered;
+    }
+
+    private void ensureSelectedProfile() {
+        if (profiles.isEmpty()) {
+            selectedProfileId = null;
+            return;
+        }
+        if (selectedProfileId != null) {
+            for (ProfileSummary profile : profiles) {
+                if (profile.ownerId.equals(selectedProfileId)) {
+                    return;
+                }
+            }
+        }
+        for (ProfileSummary profile : profiles) {
+            if (profile.isSelf) {
+                selectedProfileId = profile.ownerId;
+                return;
+            }
+        }
+        selectedProfileId = profiles.get(0).ownerId;
     }
 
     private void renderNowPlaying(DrawContext context, int panelLeft, int y) {
@@ -555,6 +774,40 @@ public class MineifyScreen extends Screen {
                     y += itemHeight;
                 }
             }
+
+            if (currentTab == 2) {
+                int contentTop = panelTop + 55;
+                int contentBottom = getListBottom(panelTop);
+                int leftPaneRight = panelLeft + PLAYLISTS_LEFT_WIDTH;
+
+                int subtabY = contentTop + 4;
+                if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 8 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 44
+                        && mouseY >= subtabY && mouseY <= subtabY + 16) {
+                    playlistsSubtab = 0;
+                    return true;
+                }
+                if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 48 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 100
+                        && mouseY >= subtabY && mouseY <= subtabY + 16) {
+                    playlistsSubtab = 1;
+                    return true;
+                }
+                if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 104 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 149
+                        && mouseY >= subtabY && mouseY <= subtabY + 16) {
+                    playlistsSubtab = 2;
+                    return true;
+                }
+
+                List<ProfileSummary> visibleProfiles = getFilteredProfiles();
+                int rowY = contentTop + 8;
+                int rowHeight = 22;
+                for (int i = profileScrollOffset; i < visibleProfiles.size() && rowY + rowHeight <= contentBottom; i++) {
+                    if (mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= rowY && mouseY <= rowY + rowHeight) {
+                        selectedProfileId = visibleProfiles.get(i).ownerId;
+                        return true;
+                    }
+                    rowY += rowHeight + 2;
+                }
+            }
         }
         return super.mouseClicked(click, doubled);
     }
@@ -603,8 +856,10 @@ public class MineifyScreen extends Screen {
         int visibleItems = 5;
         if (currentTab == 0) {
             searchScrollOffset = Math.max(0, Math.min(searchScrollOffset - (int) verticalAmount, Math.max(0, searchResults.size() - visibleItems)));
-        } else {
+        } else if (currentTab == 1) {
             playlistScrollOffset = Math.max(0, Math.min(playlistScrollOffset - (int) verticalAmount, Math.max(0, playlist.size() - visibleItems)));
+        } else {
+            profileScrollOffset = Math.max(0, Math.min(profileScrollOffset - (int) verticalAmount, Math.max(0, getFilteredProfiles().size() - visibleItems)));
         }
         return true;
     }
@@ -625,6 +880,10 @@ public class MineifyScreen extends Screen {
         }
         if (input.key() == GLFW.GLFW_KEY_ENTER && this.searchField.isFocused()) {
             performSearch();
+            return true;
+        }
+        if (currentTab == 2 && profileSearchField != null && profileSearchField.isFocused() && input.key() == GLFW.GLFW_KEY_ENTER) {
+            requestProfilesSync(profileSearchField.getText());
             return true;
         }
         return super.keyPressed(input);
@@ -670,10 +929,16 @@ public class MineifyScreen extends Screen {
         this.playbackDurationMs = MineifyClient.getCachedDurationMs();
         this.playbackPaused = MineifyClient.isCachedPaused();
         this.userPlaylists = MineifyClient.getCachedUserPlaylists();
+        this.profiles = MineifyClient.getCachedProfiles();
+        ensureSelectedProfile();
     }
 
     private void requestUserPlaylistSync() {
         ClientPlayNetworking.send(new RequestUserPlaylistsPacket());
+    }
+
+    private void requestProfilesSync(String query) {
+        ClientPlayNetworking.send(new RequestProfilesPacket(query == null ? "" : query));
     }
 
     public void updateSearchResults(List<SearchResult> results) {
@@ -687,6 +952,11 @@ public class MineifyScreen extends Screen {
 
     public void updateUserPlaylists(List<UserPlaylistSummary> entries) {
         this.userPlaylists = entries;
+    }
+
+    public void updateProfiles(List<ProfileSummary> entries) {
+        this.profiles = entries;
+        ensureSelectedProfile();
     }
 
     public void updateNowPlaying(String title, float progress, long elapsedMs, long durationMs, boolean paused) {
@@ -874,6 +1144,20 @@ public class MineifyScreen extends Screen {
             this.name = name;
             this.isPublic = isPublic;
             this.trackCount = trackCount;
+        }
+    }
+
+    public static class ProfileSummary {
+        public final String ownerId;
+        public final String ownerName;
+        public final boolean isSelf;
+        public final List<UserPlaylistSummary> playlists;
+
+        public ProfileSummary(String ownerId, String ownerName, boolean isSelf, List<UserPlaylistSummary> playlists) {
+            this.ownerId = ownerId;
+            this.ownerName = ownerName;
+            this.isSelf = isSelf;
+            this.playlists = playlists;
         }
     }
 }
