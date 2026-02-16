@@ -30,7 +30,7 @@ public class AudioPlayer {
     private volatile boolean paused = false;
     private volatile boolean pendingPause = false;
     private volatile boolean suppressStopCallback = false;
-    private volatile float volume = 1.0f;
+    private volatile float volume = 0.15f;
 
     private AudioPlayer() {}
 

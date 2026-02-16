@@ -93,7 +93,7 @@ public class MineifyScreen extends Screen {
                 .build();
         this.addDrawableChild(searchTabBtn);
 
-        ButtonWidget playlistTabBtn = ButtonWidget.builder(Text.literal("Playlist"), button -> this.currentTab = 1)
+        ButtonWidget playlistTabBtn = ButtonWidget.builder(Text.literal("Queue"), button -> this.currentTab = 1)
                 .dimensions(panelLeft + 75, panelTop + 5, 60, 20)
                 .build();
         this.addDrawableChild(playlistTabBtn);
@@ -145,7 +145,8 @@ public class MineifyScreen extends Screen {
         context.drawVerticalLine(panelLeft, panelTop, panelTop + PANEL_HEIGHT - 1, 0xFFAAAAAA);
         context.drawVerticalLine(panelLeft + PANEL_WIDTH - 1, panelTop, panelTop + PANEL_HEIGHT - 1, 0xFF555555);
 
-        context.drawCenteredTextWithShadow(this.textRenderer, this.title, centerX, panelTop - 15, 0xFFFFFFFF);
+        int titleY = Math.max(4, panelTop - 15);
+        context.drawCenteredTextWithShadow(this.textRenderer, this.title, centerX, titleY, 0xFFFFFFFF);
 
         super.render(context, mouseX, mouseY, delta);
 
@@ -198,7 +199,7 @@ public class MineifyScreen extends Screen {
         int itemHeight = 25;
 
         if (playlist.isEmpty()) {
-            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Playlist is empty"),
+            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue is empty"),
                     panelLeft + PANEL_WIDTH / 2, listTop + 20, 0xFF888888);
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Search and add songs!"),
                     panelLeft + PANEL_WIDTH / 2, listTop + 35, 0xFF666666);
