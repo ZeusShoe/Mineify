@@ -98,12 +98,18 @@ public class MineifyClient implements ClientModInitializer {
 
         ClientPlayNetworking.registerGlobalReceiver(NowPlayingPacket.ID, (payload, context) -> {
             context.client().execute(() -> {
+                boolean hasNowPlaying = payload.title() != null && !payload.title().isEmpty();
+
                 // Always update the cache
-                cachedNowPlaying = payload.title().isEmpty() ? null : payload.title();
+                cachedNowPlaying = hasNowPlaying ? payload.title() : null;
                 cachedProgress = payload.progress();
-                cachedElapsedMs = cachedNowPlaying == null ? 0 : payload.elapsedMs();
-                cachedDurationMs = cachedNowPlaying == null ? 0 : payload.durationMs();
-                cachedPaused = cachedNowPlaying != null && payload.paused();
+                cachedElapsedMs = hasNowPlaying ? payload.elapsedMs() : 0;
+                cachedDurationMs = hasNowPlaying ? payload.durationMs() : 0;
+                cachedPaused = hasNowPlaying && payload.paused();
+
+                if (!hasNowPlaying) {
+                    AudioPlayer.getInstance().stop();
+                }
 
                 // Also update screen if open
                 if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
@@ -112,7 +118,7 @@ public class MineifyClient implements ClientModInitializer {
                             payload.progress(),
                             payload.elapsedMs(),
                             payload.durationMs(),
-                            payload.paused()
+                            hasNowPlaying && payload.paused()
                     );
                 }
             });

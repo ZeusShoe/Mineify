@@ -166,12 +166,14 @@ public class PlaylistManager {
     private void playNext() {
         currentIndex++;
         if (currentIndex >= playlist.size()) {
+            cancelAdvanceSchedule();
             isPlaying = false;
             paused = false;
             pausedElapsedMs = 0;
             currentIndex = -1;
             currentDownloadUrl = null;
             playbackStartNanos = 0;
+            currentTrackDurationMs = 0;
             broadcastNowPlaying("", 0);
             broadcastPlaybackState(false);
             return;

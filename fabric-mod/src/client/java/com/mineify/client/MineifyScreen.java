@@ -30,6 +30,7 @@ public class MineifyScreen extends Screen {
     private static final int NOW_PLAYING_HEIGHT = 38;
     private static final int VOLUME_HEIGHT = 20;
     private static final int BOTTOM_PADDING = 8;
+    private static final int CONTROL_SECTION_WIDTH = 120;
 
     private TextFieldWidget searchField;
     private ButtonWidget searchButton;
@@ -67,8 +68,8 @@ public class MineifyScreen extends Screen {
         int panelLeft = centerX - PANEL_WIDTH / 2;
         int panelTop = centerY - PANEL_HEIGHT / 2;
 
-        int listTop = panelTop + 55;
         int bottomSectionTop = panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING);
+        int controlsLeft = panelLeft + PANEL_WIDTH - CONTROL_SECTION_WIDTH;
 
         this.searchField = new TextFieldWidget(
                 this.textRenderer,
@@ -99,12 +100,12 @@ public class MineifyScreen extends Screen {
 
         this.pauseResumeButton = ButtonWidget.builder(Text.literal("Pause"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket(playbackPaused ? "resume" : "pause"));
-        }).dimensions(panelLeft + PANEL_WIDTH - 120, bottomSectionTop + 2, 55, 18).build();
+        }).dimensions(controlsLeft, bottomSectionTop + 2, 55, 18).build();
         this.addDrawableChild(this.pauseResumeButton);
 
         this.skipButton = ButtonWidget.builder(Text.literal("Skip"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket("skip"));
-        }).dimensions(panelLeft + PANEL_WIDTH - 60, bottomSectionTop + 2, 50, 18).build();
+        }).dimensions(controlsLeft + 60, bottomSectionTop + 2, 50, 18).build();
         this.addDrawableChild(this.skipButton);
 
         this.volumeSlider = new SliderWidget(
@@ -241,23 +242,28 @@ public class MineifyScreen extends Screen {
 
     private void renderNowPlaying(DrawContext context, int panelLeft, int y) {
         context.fill(panelLeft, y, panelLeft + PANEL_WIDTH, y + NOW_PLAYING_HEIGHT, 0x60000000);
+        int contentLeft = panelLeft + 10;
+        int controlsLeft = panelLeft + PANEL_WIDTH - CONTROL_SECTION_WIDTH;
+        int contentRight = controlsLeft - 8;
+        int contentWidth = Math.max(20, contentRight - contentLeft);
 
         if (nowPlaying != null) {
             String prefix = playbackPaused ? "|| " : "\u266A ";
-            String text = prefix + truncateText(nowPlaying, PANEL_WIDTH - 145);
-            context.drawTextWithShadow(this.textRenderer, Text.literal(text), panelLeft + 10, y + 5, 0xFF55FF55);
+            String text = prefix + truncateText(nowPlaying, contentWidth);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(text), contentLeft, y + 5, 0xFF55FF55);
 
             String timeText = formatTime(playbackElapsedMs) + " / " + formatTime(playbackDurationMs);
             int timeWidth = this.textRenderer.getWidth(timeText);
-            context.drawTextWithShadow(this.textRenderer, Text.literal(timeText), panelLeft + PANEL_WIDTH - 10 - timeWidth, y + 5, 0xFFAAAAAA);
+            int timeX = Math.max(contentLeft, contentRight - timeWidth);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(timeText), timeX, y + 15, 0xFFAAAAAA);
 
-            int barWidth = PANEL_WIDTH - 20;
-            int barX = panelLeft + 10;
+            int barWidth = contentWidth;
+            int barX = contentLeft;
             int barY = y + 24;
             context.fill(barX, barY, barX + barWidth, barY + 4, 0x44FFFFFF);
             context.fill(barX, barY, barX + (int) (barWidth * playbackProgress), barY + 4, playbackPaused ? 0xFFFFAA00 : 0xFF55FF55);
         } else {
-            context.drawTextWithShadow(this.textRenderer, Text.literal("Nothing playing"), panelLeft + 10, y + 12, 0xFF666666);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("Nothing playing"), contentLeft, y + 12, 0xFF666666);
         }
     }
 
