@@ -9,7 +9,10 @@ import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
+import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
+import com.mineify.network.packets.SpotifyImportFinishedPacket;
+import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
@@ -25,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -39,7 +43,10 @@ public class PlaylistManager {
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final List<PlaylistSyncPacket.Entry> playlist = new CopyOnWriteArrayList<>();
     private final Map<String, List<UserPlaylist>> userPlaylistsByOwner = new HashMap<>();
+    private final List<RecentlyPlayedEntry> recentlyPlayed = new ArrayList<>();
+    private final Map<String, SpotifyImportSession> spotifyImportSessions = new ConcurrentHashMap<>();
     private final Path userPlaylistsFile;
+    private final Path recentlyPlayedFile;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "Mineify-Scheduler");
         t.setDaemon(true);
@@ -62,7 +69,11 @@ public class PlaylistManager {
         this.userPlaylistsFile = server.getRunDirectory()
                 .resolve("MineifyCompanion")
                 .resolve("playlists.json");
+        this.recentlyPlayedFile = server.getRunDirectory()
+                .resolve("MineifyCompanion")
+                .resolve("recently_played.json");
         loadUserPlaylists();
+        loadRecentlyPlayed();
 
         this.progressFuture = scheduler.scheduleAtFixedRate(() -> {
             if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
@@ -235,6 +246,67 @@ public class PlaylistManager {
         ServerPlayNetworking.send(player, new ProfilesSyncPacket(entries));
     }
 
+    public void handleStartSpotifyImport(ServerPlayerEntity player, String spotifyUrl, String targetPlaylistId) {
+        if (spotifyUrl == null || spotifyUrl.isBlank() || targetPlaylistId == null || targetPlaylistId.isBlank()) {
+            return;
+        }
+
+        UserPlaylist targetPlaylist = findUserPlaylist(player.getUuidAsString(), targetPlaylistId);
+        if (targetPlaylist == null) {
+            return;
+        }
+
+        String playerId = player.getUuidAsString();
+        spotifyImportSessions.remove(playerId);
+
+        companionClient.getSpotifyPlaylistTracks(spotifyUrl).thenAccept(tracks -> {
+            server.execute(() -> {
+                if (tracks.isEmpty()) {
+                    player.sendMessage(net.minecraft.text.Text.literal("Spotify import failed: no tracks found."), false);
+                    return;
+                }
+
+                SpotifyImportSession session = new SpotifyImportSession(playerId, targetPlaylistId, tracks);
+                spotifyImportSessions.put(playerId, session);
+                processSpotifyImportNext(player);
+            });
+        });
+    }
+
+    public void handleResolveSpotifyImportChoice(ServerPlayerEntity player, String videoId) {
+        SpotifyImportSession session = spotifyImportSessions.get(player.getUuidAsString());
+        if (session == null || session.pendingTrack == null) {
+            return;
+        }
+
+        CompanionClient.SearchResult chosen = null;
+        if (videoId != null && !videoId.isBlank()) {
+            for (CompanionClient.SearchResult option : session.pendingOptions) {
+                if (option.videoId().equals(videoId)) {
+                    chosen = option;
+                    break;
+                }
+            }
+        }
+
+        if (chosen != null) {
+            addTrackToUserPlaylistInternal(player.getUuidAsString(), session.targetPlaylistId, chosen.videoId(), chosen.title(), chosen.duration());
+            session.addedCount++;
+        } else {
+            session.skippedCount++;
+            session.unresolvedCount++;
+        }
+
+        session.pendingTrack = null;
+        session.pendingOptions = List.of();
+        session.currentIndex++;
+        processSpotifyImportNext(player);
+    }
+
+    public void handleRequestRecentlyPlayed(ServerPlayerEntity player) {
+        syncRecentlyPlayedToPlayer(player);
+    }
+
     public void handleCreateUserPlaylist(
             ServerPlayerEntity player,
             String name,
@@ -284,16 +356,9 @@ public class PlaylistManager {
         if (userPlaylists == null) {
             return;
         }
-
-        for (UserPlaylist playlistModel : userPlaylists) {
-            if (!playlistModel.id.equals(playlistId)) {
-                continue;
-            }
-
-            playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
+        if (addTrackToUserPlaylistInternal(player.getUuidAsString(), playlistId, videoId, title, duration)) {
             saveUserPlaylists();
             syncUserPlaylistsToPlayer(player);
-            return;
         }
     }
 
@@ -316,6 +381,7 @@ public class PlaylistManager {
             ServerPlayNetworking.send(player, new PlaybackStatePacket(paused));
         }
         syncUserPlaylistsToPlayer(player);
+        syncRecentlyPlayedToPlayer(player);
     }
 
     private void playNext() {
@@ -363,6 +429,7 @@ public class PlaylistManager {
                     ServerPlayNetworking.send(p, packet);
                 }
 
+                recordRecentlyPlayed(entry);
                 broadcastPlaybackState(false);
                 broadcastNowPlaying(entry.title(), 0L);
                 scheduleAdvanceFromCurrentState();
@@ -467,6 +534,169 @@ public class PlaylistManager {
         ServerPlayNetworking.send(player, new UserPlaylistsSyncPacket(entries));
     }
 
+    private void syncRecentlyPlayedToPlayer(ServerPlayerEntity player) {
+        List<RecentlyPlayedSyncPacket.Entry> entries = new ArrayList<>(recentlyPlayed.size());
+        for (RecentlyPlayedEntry entry : recentlyPlayed) {
+            entries.add(new RecentlyPlayedSyncPacket.Entry(
+                    entry.videoId,
+                    entry.title,
+                    entry.duration,
+                    entry.playedAtEpochMs
+            ));
+        }
+        ServerPlayNetworking.send(player, new RecentlyPlayedSyncPacket(entries));
+    }
+
+    private void broadcastRecentlyPlayed() {
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            syncRecentlyPlayedToPlayer(player);
+        }
+    }
+
+    private void recordRecentlyPlayed(PlaylistSyncPacket.Entry entry) {
+        recentlyPlayed.add(0, new RecentlyPlayedEntry(
+                entry.videoId(),
+                entry.title(),
+                entry.duration(),
+                System.currentTimeMillis()
+        ));
+        if (recentlyPlayed.size() > 200) {
+            recentlyPlayed.remove(recentlyPlayed.size() - 1);
+        }
+        saveRecentlyPlayed();
+        broadcastRecentlyPlayed();
+    }
+
+    private void processSpotifyImportNext(ServerPlayerEntity player) {
+        SpotifyImportSession session = spotifyImportSessions.get(player.getUuidAsString());
+        if (session == null) {
+            return;
+        }
+
+        if (session.currentIndex >= session.tracks.size()) {
+            spotifyImportSessions.remove(player.getUuidAsString());
+            saveUserPlaylists();
+            syncUserPlaylistsToPlayer(player);
+            ServerPlayNetworking.send(player, new SpotifyImportFinishedPacket(
+                    session.addedCount,
+                    session.skippedCount,
+                    session.unresolvedCount
+            ));
+            return;
+        }
+
+        CompanionClient.SpotifyTrack spotifyTrack = session.tracks.get(session.currentIndex);
+        companionClient.search(spotifyTrack.query()).thenAccept(results ->
+                server.execute(() -> handleSpotifySearchResults(player, session, spotifyTrack, results))
+        );
+    }
+
+    private void handleSpotifySearchResults(
+            ServerPlayerEntity player,
+            SpotifyImportSession session,
+            CompanionClient.SpotifyTrack spotifyTrack,
+            List<CompanionClient.SearchResult> results
+    ) {
+        if (results == null || results.isEmpty()) {
+            session.skippedCount++;
+            session.unresolvedCount++;
+            session.currentIndex++;
+            processSpotifyImportNext(player);
+            return;
+        }
+
+        int topCount = Math.min(3, results.size());
+        List<CompanionClient.SearchResult> topResults = new ArrayList<>(results.subList(0, topCount));
+        double bestScore = scoreMatch(spotifyTrack, topResults.get(0));
+
+        if (bestScore >= 0.72d) {
+            CompanionClient.SearchResult best = topResults.get(0);
+            addTrackToUserPlaylistInternal(player.getUuidAsString(), session.targetPlaylistId, best.videoId(), best.title(), best.duration());
+            session.addedCount++;
+            session.currentIndex++;
+            processSpotifyImportNext(player);
+            return;
+        }
+
+        session.pendingTrack = spotifyTrack;
+        session.pendingOptions = topResults;
+
+        List<SpotifyImportPromptPacket.Option> options = new ArrayList<>();
+        for (CompanionClient.SearchResult option : topResults) {
+            options.add(new SpotifyImportPromptPacket.Option(
+                    option.videoId(),
+                    option.title(),
+                    option.channel(),
+                    option.duration()
+            ));
+        }
+
+        ServerPlayNetworking.send(player, new SpotifyImportPromptPacket(
+                spotifyTrack.title(),
+                spotifyTrack.artist(),
+                session.currentIndex + 1,
+                session.tracks.size(),
+                options
+        ));
+    }
+
+    private double scoreMatch(CompanionClient.SpotifyTrack spotifyTrack, CompanionClient.SearchResult youtube) {
+        String yt = normalizeText(youtube.title());
+        String title = normalizeText(spotifyTrack.title());
+        String artist = normalizeText(spotifyTrack.artist());
+
+        double score = 0.0d;
+        if (!title.isBlank() && yt.contains(title)) {
+            score += 0.65d;
+        }
+        if (!artist.isBlank()) {
+            String[] parts = artist.split(",");
+            for (String part : parts) {
+                String trimmed = part.trim();
+                if (!trimmed.isBlank() && yt.contains(trimmed)) {
+                    score += 0.18d;
+                    break;
+                }
+            }
+        }
+        if (yt.contains("karaoke") || yt.contains("slowed") || yt.contains("sped up") || yt.contains("nightcore")) {
+            score -= 0.22d;
+        }
+        return Math.max(0.0d, Math.min(1.0d, score));
+    }
+
+    private String normalizeText(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9\\s,]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private UserPlaylist findUserPlaylist(String ownerId, String playlistId) {
+        List<UserPlaylist> userPlaylists = userPlaylistsByOwner.get(ownerId);
+        if (userPlaylists == null) {
+            return null;
+        }
+        for (UserPlaylist playlistModel : userPlaylists) {
+            if (playlistModel.id.equals(playlistId)) {
+                return playlistModel;
+            }
+        }
+        return null;
+    }
+
+    private boolean addTrackToUserPlaylistInternal(String ownerId, String playlistId, String videoId, String title, String duration) {
+        UserPlaylist playlistModel = findUserPlaylist(ownerId, playlistId);
+        if (playlistModel == null) {
+            return false;
+        }
+        playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
+        return true;
+    }
+
     private List<ProfilesSyncPacket.PlaylistEntry> toProfilePlaylistEntries(List<UserPlaylist> playlists, boolean includePrivate) {
         List<ProfilesSyncPacket.PlaylistEntry> entries = new ArrayList<>();
         for (UserPlaylist playlistModel : playlists) {
@@ -518,6 +748,25 @@ public class PlaylistManager {
         }
     }
 
+    private void loadRecentlyPlayed() {
+        if (!Files.exists(recentlyPlayedFile)) {
+            return;
+        }
+
+        try (Reader reader = Files.newBufferedReader(recentlyPlayedFile)) {
+            Type type = new TypeToken<List<RecentlyPlayedEntry>>() {
+            }.getType();
+            List<RecentlyPlayedEntry> loaded = gson.fromJson(reader, type);
+            recentlyPlayed.clear();
+            if (loaded != null) {
+                recentlyPlayed.addAll(loaded);
+            }
+            Mineify.LOGGER.info("Loaded {} recently played entries", recentlyPlayed.size());
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Failed to load recently played from {}", recentlyPlayedFile, e);
+        }
+    }
+
     private void saveUserPlaylists() {
         try {
             Files.createDirectories(userPlaylistsFile.getParent());
@@ -526,6 +775,17 @@ public class PlaylistManager {
             }
         } catch (IOException e) {
             Mineify.LOGGER.error("Failed to save user playlists to {}", userPlaylistsFile, e);
+        }
+    }
+
+    private void saveRecentlyPlayed() {
+        try {
+            Files.createDirectories(recentlyPlayedFile.getParent());
+            try (Writer writer = Files.newBufferedWriter(recentlyPlayedFile)) {
+                gson.toJson(recentlyPlayed, writer);
+            }
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Failed to save recently played to {}", recentlyPlayedFile, e);
         }
     }
 
@@ -564,6 +824,8 @@ public class PlaylistManager {
             progressFuture.cancel(true);
         }
         saveUserPlaylists();
+        saveRecentlyPlayed();
+        spotifyImportSessions.clear();
         scheduler.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
@@ -601,6 +863,41 @@ public class PlaylistManager {
             this.videoId = videoId;
             this.title = title;
             this.duration = duration;
+        }
+    }
+
+    private static class RecentlyPlayedEntry {
+        String videoId;
+        String title;
+        String duration;
+        long playedAtEpochMs;
+
+        RecentlyPlayedEntry() {
+        }
+
+        RecentlyPlayedEntry(String videoId, String title, String duration, long playedAtEpochMs) {
+            this.videoId = videoId;
+            this.title = title;
+            this.duration = duration;
+            this.playedAtEpochMs = playedAtEpochMs;
+        }
+    }
+
+    private static class SpotifyImportSession {
+        final String ownerId;
+        final String targetPlaylistId;
+        final List<CompanionClient.SpotifyTrack> tracks;
+        int currentIndex = 0;
+        int addedCount = 0;
+        int skippedCount = 0;
+        int unresolvedCount = 0;
+        CompanionClient.SpotifyTrack pendingTrack;
+        List<CompanionClient.SearchResult> pendingOptions = List.of();
+
+        SpotifyImportSession(String ownerId, String targetPlaylistId, List<CompanionClient.SpotifyTrack> tracks) {
+            this.ownerId = ownerId;
+            this.targetPlaylistId = targetPlaylistId;
+            this.tracks = tracks;
         }
     }
 }

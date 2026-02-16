@@ -8,6 +8,9 @@ import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
+import com.mineify.network.packets.RecentlyPlayedSyncPacket;
+import com.mineify.network.packets.SpotifyImportFinishedPacket;
+import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.SearchResultsPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.api.ClientModInitializer;
@@ -35,6 +38,7 @@ public class MineifyClient implements ClientModInitializer {
     private static boolean cachedPaused = false;
     private static List<MineifyScreen.UserPlaylistSummary> cachedUserPlaylists = new ArrayList<>();
     private static List<MineifyScreen.ProfileSummary> cachedProfiles = new ArrayList<>();
+    private static List<MineifyScreen.RecentlyPlayedEntry> cachedRecentlyPlayed = new ArrayList<>();
 
     public static List<MineifyScreen.PlaylistEntry> getCachedPlaylist() {
         return new ArrayList<>(cachedPlaylist);
@@ -66,6 +70,10 @@ public class MineifyClient implements ClientModInitializer {
 
     public static List<MineifyScreen.ProfileSummary> getCachedProfiles() {
         return new ArrayList<>(cachedProfiles);
+    }
+
+    public static List<MineifyScreen.RecentlyPlayedEntry> getCachedRecentlyPlayed() {
+        return new ArrayList<>(cachedRecentlyPlayed);
     }
 
     @Override
@@ -183,6 +191,56 @@ public class MineifyClient implements ClientModInitializer {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(RecentlyPlayedSyncPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                List<MineifyScreen.RecentlyPlayedEntry> entries = new ArrayList<>();
+                for (var entry : payload.entries()) {
+                    entries.add(new MineifyScreen.RecentlyPlayedEntry(
+                            entry.videoId(),
+                            entry.title(),
+                            entry.duration(),
+                            entry.playedAtEpochMs()
+                    ));
+                }
+                cachedRecentlyPlayed = entries;
+
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.updateRecentlyPlayed(entries);
+                }
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(SpotifyImportPromptPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                List<MineifyScreen.SpotifyChoiceOption> options = new ArrayList<>();
+                for (var option : payload.options()) {
+                    options.add(new MineifyScreen.SpotifyChoiceOption(
+                            option.videoId(),
+                            option.title(),
+                            option.channel(),
+                            option.duration()
+                    ));
+                }
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.showSpotifyImportPrompt(
+                            payload.spotifyTitle(),
+                            payload.spotifyArtist(),
+                            payload.currentIndex(),
+                            payload.totalTracks(),
+                            options
+                    );
+                }
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(SpotifyImportFinishedPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.showSpotifyImportFinished(payload.addedCount(), payload.skippedCount(), payload.unresolvedCount());
+                }
+            });
+        });
+
         // Play audio when server sends PlayAudioPacket
         ClientPlayNetworking.registerGlobalReceiver(PlayAudioPacket.ID, (payload, context) -> {
             long packetReceivedAtNanos = System.nanoTime();
@@ -225,6 +283,7 @@ public class MineifyClient implements ClientModInitializer {
             cachedPlaylist = new ArrayList<>();
             cachedUserPlaylists = new ArrayList<>();
             cachedProfiles = new ArrayList<>();
+            cachedRecentlyPlayed = new ArrayList<>();
         });
     }
 }

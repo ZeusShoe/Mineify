@@ -7,11 +7,17 @@ import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
+import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
+import com.mineify.network.packets.RequestRecentlyPlayedPacket;
 import com.mineify.network.packets.RequestProfilesPacket;
 import com.mineify.network.packets.RequestUserPlaylistsPacket;
+import com.mineify.network.packets.ResolveSpotifyImportChoicePacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
+import com.mineify.network.packets.SpotifyImportFinishedPacket;
+import com.mineify.network.packets.SpotifyImportPromptPacket;
+import com.mineify.network.packets.StartSpotifyImportPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -28,6 +34,9 @@ public class MineifyPackets {
         PayloadTypeRegistry.playC2S().register(CreateUserPlaylistPacket.ID, CreateUserPlaylistPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(AddToUserPlaylistPacket.ID, AddToUserPlaylistPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(RequestProfilesPacket.ID, RequestProfilesPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(StartSpotifyImportPacket.ID, StartSpotifyImportPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(ResolveSpotifyImportChoicePacket.ID, ResolveSpotifyImportChoicePacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(RequestRecentlyPlayedPacket.ID, RequestRecentlyPlayedPacket.CODEC);
 
         // Register S2C (server-to-client) packet types
         PayloadTypeRegistry.playS2C().register(
@@ -57,6 +66,18 @@ public class MineifyPackets {
         PayloadTypeRegistry.playS2C().register(
                 ProfilesSyncPacket.ID,
                 ProfilesSyncPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                SpotifyImportPromptPacket.ID,
+                SpotifyImportPromptPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                SpotifyImportFinishedPacket.ID,
+                SpotifyImportFinishedPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                RecentlyPlayedSyncPacket.ID,
+                RecentlyPlayedSyncPacket.CODEC
         );
 
         // Register server-side handlers
@@ -151,6 +172,33 @@ public class MineifyPackets {
                 var manager = Mineify.getPlaylistManager();
                 if (manager != null) {
                     manager.handleRequestProfiles(context.player(), payload.query());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(StartSpotifyImportPacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleStartSpotifyImport(context.player(), payload.spotifyUrl(), payload.targetPlaylistId());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(ResolveSpotifyImportChoicePacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleResolveSpotifyImportChoice(context.player(), payload.videoId());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(RequestRecentlyPlayedPacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleRequestRecentlyPlayed(context.player());
                 }
             });
         });

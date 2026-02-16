@@ -7,10 +7,13 @@ import com.mineify.network.packets.AddToUserPlaylistPacket;
 import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
+import com.mineify.network.packets.RequestRecentlyPlayedPacket;
 import com.mineify.network.packets.RequestProfilesPacket;
 import com.mineify.network.packets.RequestUserPlaylistsPacket;
+import com.mineify.network.packets.ResolveSpotifyImportChoicePacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
+import com.mineify.network.packets.StartSpotifyImportPacket;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -45,6 +48,8 @@ public class MineifyScreen extends Screen {
     private static final int MODAL_WIDTH = 220;
     private static final int MODAL_HEIGHT = 140;
     private static final int PLAYLISTS_LEFT_WIDTH = 130;
+    private static final int SPOTIFY_MODAL_WIDTH = 300;
+    private static final int SPOTIFY_MODAL_HEIGHT = 170;
 
     private TextFieldWidget searchField;
     private ButtonWidget searchButton;
@@ -53,14 +58,21 @@ public class MineifyScreen extends Screen {
     private SliderWidget volumeSlider;
     private TextFieldWidget newPlaylistNameField;
     private TextFieldWidget profileSearchField;
+    private TextFieldWidget spotifyLinkField;
     private ButtonWidget playlistPrivacyButton;
     private ButtonWidget createPlaylistButton;
     private ButtonWidget cancelCreatePlaylistButton;
+    private ButtonWidget importSpotifyButton;
+    private ButtonWidget spotifyOptionButton1;
+    private ButtonWidget spotifyOptionButton2;
+    private ButtonWidget spotifyOptionButton3;
+    private ButtonWidget spotifySkipButton;
 
     private List<SearchResult> searchResults = new ArrayList<>();
     private List<PlaylistEntry> playlist = new ArrayList<>();
     private List<UserPlaylistSummary> userPlaylists = new ArrayList<>();
     private List<ProfileSummary> profiles = new ArrayList<>();
+    private List<RecentlyPlayedEntry> recentlyPlayed = new ArrayList<>();
 
     private int currentTab = 0;
     private int searchScrollOffset = 0;
@@ -77,10 +89,13 @@ public class MineifyScreen extends Screen {
     private int queueDragTargetIndex = -1;
     private boolean showPlaylistPicker = false;
     private boolean showCreatePlaylistDialog = false;
+    private boolean showSpotifyPromptDialog = false;
     private SearchResult pendingPlaylistSearchResult = null;
     private boolean newPlaylistPublic = true;
     private String selectedProfileId = null;
+    private String selectedUserPlaylistId = null;
     private int playlistsSubtab = 0; // 0: Me, 1: Others, 2: Liked
+    private SpotifyPromptState spotifyPromptState = null;
 
     private String currentPlayerName;
 
@@ -136,6 +151,14 @@ public class MineifyScreen extends Screen {
                 .dimensions(panelLeft + 140, panelTop + 5, 70, 20)
                 .build();
         this.addDrawableChild(playlistsTabBtn);
+
+        ButtonWidget recentTabBtn = ButtonWidget.builder(Text.literal("Recent"), button -> {
+                    this.currentTab = 3;
+                    requestRecentlyPlayedSync();
+                })
+                .dimensions(panelLeft + 215, panelTop + 5, 60, 20)
+                .build();
+        this.addDrawableChild(recentTabBtn);
 
         this.pauseResumeButton = ButtonWidget.builder(Text.literal("Pause"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket(playbackPaused ? "resume" : "pause"));
@@ -220,11 +243,51 @@ public class MineifyScreen extends Screen {
         this.profileSearchField.setEditable(false);
         this.addDrawableChild(this.profileSearchField);
 
+        this.spotifyLinkField = new TextFieldWidget(
+                this.textRenderer,
+                panelLeft + PLAYLISTS_LEFT_WIDTH + 8,
+                panelTop + 30,
+                PANEL_WIDTH - PLAYLISTS_LEFT_WIDTH - 82,
+                18,
+                Text.literal("Spotify playlist link")
+        );
+        this.spotifyLinkField.setMaxLength(200);
+        this.spotifyLinkField.setPlaceholder(Text.literal("https://open.spotify.com/playlist/..."));
+        this.spotifyLinkField.visible = false;
+        this.spotifyLinkField.setEditable(false);
+        this.addDrawableChild(this.spotifyLinkField);
+
+        this.importSpotifyButton = ButtonWidget.builder(Text.literal("Import"), button -> startSpotifyImport())
+                .dimensions(panelLeft + PANEL_WIDTH - 68, panelTop + 30, 58, 18)
+                .build();
+        this.importSpotifyButton.visible = false;
+        this.importSpotifyButton.active = false;
+        this.addDrawableChild(this.importSpotifyButton);
+
+        int spotifyModalLeft = centerX - (SPOTIFY_MODAL_WIDTH / 2);
+        int spotifyModalTop = centerY - (SPOTIFY_MODAL_HEIGHT / 2);
+        this.spotifyOptionButton1 = ButtonWidget.builder(Text.literal("Option 1"), button -> chooseSpotifyOption(0))
+                .dimensions(spotifyModalLeft + 12, spotifyModalTop + 60, SPOTIFY_MODAL_WIDTH - 24, 18).build();
+        this.spotifyOptionButton2 = ButtonWidget.builder(Text.literal("Option 2"), button -> chooseSpotifyOption(1))
+                .dimensions(spotifyModalLeft + 12, spotifyModalTop + 82, SPOTIFY_MODAL_WIDTH - 24, 18).build();
+        this.spotifyOptionButton3 = ButtonWidget.builder(Text.literal("Option 3"), button -> chooseSpotifyOption(2))
+                .dimensions(spotifyModalLeft + 12, spotifyModalTop + 104, SPOTIFY_MODAL_WIDTH - 24, 18).build();
+        this.spotifySkipButton = ButtonWidget.builder(Text.literal("Skip Track"), button -> skipSpotifyOption())
+                .dimensions(spotifyModalLeft + SPOTIFY_MODAL_WIDTH - 100, spotifyModalTop + SPOTIFY_MODAL_HEIGHT - 24, 88, 18).build();
+        for (ButtonWidget btn : List.of(spotifyOptionButton1, spotifyOptionButton2, spotifyOptionButton3, spotifySkipButton)) {
+            btn.visible = false;
+            btn.active = false;
+            this.addDrawableChild(btn);
+        }
+
         requestPlaylistSync();
         requestUserPlaylistSync();
         requestProfilesSync("");
+        requestRecentlyPlayedSync();
         updateControlButtons();
         updateCreatePlaylistControls();
+        updateSpotifyControls(panelLeft, panelTop);
+        updateSpotifyPromptButtons();
     }
 
     @Override
@@ -243,7 +306,8 @@ public class MineifyScreen extends Screen {
         int titleY = Math.max(4, panelTop - 15);
         context.drawCenteredTextWithShadow(this.textRenderer, this.title, centerX, titleY, 0xFFFFFFFF);
 
-        boolean showSearchControls = currentTab == 0 && !showPlaylistPicker && !showCreatePlaylistDialog;
+        boolean hasBlockingModal = showPlaylistPicker || showCreatePlaylistDialog || showSpotifyPromptDialog;
+        boolean showSearchControls = currentTab == 0 && !hasBlockingModal;
         if (searchField != null) {
             searchField.visible = showSearchControls;
             searchField.setEditable(showSearchControls);
@@ -253,10 +317,20 @@ public class MineifyScreen extends Screen {
             searchButton.active = showSearchControls;
         }
 
-        boolean showProfileSearch = currentTab == 2 && !showPlaylistPicker && !showCreatePlaylistDialog;
+        boolean showProfileSearch = currentTab == 2 && !hasBlockingModal;
         if (profileSearchField != null) {
             profileSearchField.visible = showProfileSearch;
             profileSearchField.setEditable(showProfileSearch);
+        }
+
+        boolean showSpotifyControls = currentTab == 2 && !hasBlockingModal && isSelfProfileSelected();
+        if (spotifyLinkField != null) {
+            spotifyLinkField.visible = showSpotifyControls;
+            spotifyLinkField.setEditable(showSpotifyControls);
+        }
+        if (importSpotifyButton != null) {
+            importSpotifyButton.visible = showSpotifyControls;
+            importSpotifyButton.active = showSpotifyControls && selectedUserPlaylistId != null;
         }
 
         super.render(context, mouseX, mouseY, delta);
@@ -265,12 +339,15 @@ public class MineifyScreen extends Screen {
             renderSearchTab(context, panelLeft, panelTop, mouseX, mouseY);
         } else if (currentTab == 1) {
             renderPlaylistTab(context, panelLeft, panelTop, mouseX, mouseY);
-        } else {
+        } else if (currentTab == 2) {
             renderProfilesTab(context, panelLeft, panelTop, mouseX, mouseY);
+        } else {
+            renderRecentlyPlayedTab(context, panelLeft, panelTop);
         }
 
         renderNowPlaying(context, panelLeft, panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING));
         renderPlaylistModals(context, mouseX, mouseY);
+        renderSpotifyPromptModal(context);
     }
 
     private int getListBottom(int panelTop) {
@@ -449,7 +526,8 @@ public class MineifyScreen extends Screen {
         int py = contentTop + 52;
         for (int i = 0; i < filteredPlaylists.size() && py + 18 <= contentBottom; i++) {
             UserPlaylistSummary summary = filteredPlaylists.get(i);
-            context.fill(detailsLeft, py, panelLeft + PANEL_WIDTH - 14, py + 18, 0x33222222);
+            boolean playlistSelected = summary.id.equals(selectedUserPlaylistId);
+            context.fill(detailsLeft, py, panelLeft + PANEL_WIDTH - 14, py + 18, playlistSelected ? 0x66448844 : 0x33222222);
             String privacy = summary.isPublic ? "Public" : "Private";
             context.drawTextWithShadow(
                     this.textRenderer,
@@ -464,6 +542,53 @@ public class MineifyScreen extends Screen {
         if (filteredPlaylists.isEmpty()) {
             context.drawTextWithShadow(this.textRenderer, Text.literal("No playlists in this section"), detailsLeft, contentTop + 58, 0xFF888888);
         }
+    }
+
+    private void renderRecentlyPlayedTab(DrawContext context, int panelLeft, int panelTop) {
+        int listTop = panelTop + 55;
+        int listBottom = getListBottom(panelTop);
+        int y = listTop;
+        int rowHeight = 20;
+
+        if (recentlyPlayed.isEmpty()) {
+            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("No recently played tracks"), panelLeft + PANEL_WIDTH / 2, listTop + 20, 0xFF888888);
+            return;
+        }
+
+        for (int i = 0; i < recentlyPlayed.size() && y + rowHeight <= listBottom; i++) {
+            RecentlyPlayedEntry entry = recentlyPlayed.get(i);
+            context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + rowHeight - 2, 0x22222222);
+            String text = truncateText(entry.title + " (" + entry.duration + ")", PANEL_WIDTH - 100);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(text), panelLeft + 14, y + 5, 0xFFFFFFFF);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(formatTimeAgo(entry.playedAtEpochMs)), panelLeft + PANEL_WIDTH - 88, y + 5, 0xFFAAAAAA);
+            y += rowHeight + 2;
+        }
+    }
+
+    private void renderSpotifyPromptModal(DrawContext context) {
+        if (!showSpotifyPromptDialog || spotifyPromptState == null) {
+            return;
+        }
+
+        int left = (this.width / 2) - (SPOTIFY_MODAL_WIDTH / 2);
+        int top = (this.height / 2) - (SPOTIFY_MODAL_HEIGHT / 2);
+        int right = left + SPOTIFY_MODAL_WIDTH;
+        int bottom = top + SPOTIFY_MODAL_HEIGHT;
+
+        context.fill(0, 0, this.width, this.height, 0x88000000);
+        context.fill(left, top, right, bottom, 0xF0101010);
+        context.drawHorizontalLine(left, right - 1, top, 0xFFAAAAAA);
+        context.drawHorizontalLine(left, right - 1, bottom - 1, 0xFF666666);
+        context.drawVerticalLine(left, top, bottom - 1, 0xFFAAAAAA);
+        context.drawVerticalLine(right - 1, top, bottom - 1, 0xFF666666);
+        context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Spotify Match Needed"), this.width / 2, top + 8, 0xFFFFFFFF);
+        context.drawTextWithShadow(
+                this.textRenderer,
+                Text.literal(spotifyPromptState.currentIndex + "/" + spotifyPromptState.totalTracks + " " + truncateText(spotifyPromptState.spotifyTitle + " - " + spotifyPromptState.spotifyArtist, SPOTIFY_MODAL_WIDTH - 20)),
+                left + 10,
+                top + 28,
+                0xFFDDDDDD
+        );
     }
 
     private void drawSubtab(DrawContext context, int x, int y, int width, String label, boolean active) {
@@ -547,6 +672,7 @@ public class MineifyScreen extends Screen {
     private void ensureSelectedProfile() {
         if (profiles.isEmpty()) {
             selectedProfileId = null;
+            selectedUserPlaylistId = null;
             return;
         }
         if (selectedProfileId != null) {
@@ -563,6 +689,95 @@ public class MineifyScreen extends Screen {
             }
         }
         selectedProfileId = profiles.get(0).ownerId;
+        selectedUserPlaylistId = null;
+    }
+
+    private boolean isSelfProfileSelected() {
+        ProfileSummary selected = getSelectedProfile();
+        return selected != null && selected.isSelf;
+    }
+
+    private void startSpotifyImport() {
+        if (!isSelfProfileSelected() || selectedUserPlaylistId == null || spotifyLinkField == null) {
+            return;
+        }
+        String spotifyUrl = spotifyLinkField.getText().trim();
+        if (spotifyUrl.isEmpty()) {
+            return;
+        }
+        ClientPlayNetworking.send(new StartSpotifyImportPacket(spotifyUrl, selectedUserPlaylistId));
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) {
+            client.player.sendMessage(Text.literal("Spotify import started..."), false);
+        }
+    }
+
+    private void chooseSpotifyOption(int optionIndex) {
+        if (spotifyPromptState == null || optionIndex < 0 || optionIndex >= spotifyPromptState.options.size()) {
+            return;
+        }
+        String videoId = spotifyPromptState.options.get(optionIndex).videoId;
+        ClientPlayNetworking.send(new ResolveSpotifyImportChoicePacket(videoId));
+        showSpotifyPromptDialog = false;
+        spotifyPromptState = null;
+        updateSpotifyPromptButtons();
+    }
+
+    private void skipSpotifyOption() {
+        ClientPlayNetworking.send(new ResolveSpotifyImportChoicePacket(""));
+        showSpotifyPromptDialog = false;
+        spotifyPromptState = null;
+        updateSpotifyPromptButtons();
+    }
+
+    private void updateSpotifyPromptButtons() {
+        boolean visible = showSpotifyPromptDialog && spotifyPromptState != null;
+        List<ButtonWidget> optionButtons = List.of(spotifyOptionButton1, spotifyOptionButton2, spotifyOptionButton3);
+        for (int i = 0; i < optionButtons.size(); i++) {
+            ButtonWidget button = optionButtons.get(i);
+            if (button == null) {
+                continue;
+            }
+            boolean hasOption = visible && i < spotifyPromptState.options.size();
+            button.visible = hasOption;
+            button.active = hasOption;
+            if (hasOption) {
+                SpotifyChoiceOption option = spotifyPromptState.options.get(i);
+                button.setMessage(Text.literal((i + 1) + ". " + truncateText(option.title, SPOTIFY_MODAL_WIDTH - 46)));
+            }
+        }
+        if (spotifySkipButton != null) {
+            spotifySkipButton.visible = visible;
+            spotifySkipButton.active = visible;
+        }
+    }
+
+    private void updateSpotifyControls(int panelLeft, int panelTop) {
+        if (spotifyLinkField != null) {
+            spotifyLinkField.visible = false;
+            spotifyLinkField.setEditable(false);
+        }
+        if (importSpotifyButton != null) {
+            importSpotifyButton.visible = false;
+            importSpotifyButton.active = false;
+        }
+    }
+
+    private String formatTimeAgo(long epochMs) {
+        long diffSec = Math.max(0, (System.currentTimeMillis() - epochMs) / 1000);
+        if (diffSec < 60) {
+            return diffSec + "s ago";
+        }
+        long min = diffSec / 60;
+        if (min < 60) {
+            return min + "m ago";
+        }
+        long hours = min / 60;
+        if (hours < 24) {
+            return hours + "h ago";
+        }
+        long days = hours / 24;
+        return days + "d ago";
     }
 
     private void renderNowPlaying(DrawContext context, int panelLeft, int y) {
@@ -674,6 +889,10 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseClicked(Click click, boolean doubled) {
+        if (showSpotifyPromptDialog) {
+            return super.mouseClicked(click, doubled);
+        }
+
         if (showCreatePlaylistDialog) {
             return super.mouseClicked(click, doubled);
         }
@@ -784,16 +1003,19 @@ public class MineifyScreen extends Screen {
                 if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 8 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 44
                         && mouseY >= subtabY && mouseY <= subtabY + 16) {
                     playlistsSubtab = 0;
+                    selectedUserPlaylistId = null;
                     return true;
                 }
                 if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 48 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 100
                         && mouseY >= subtabY && mouseY <= subtabY + 16) {
                     playlistsSubtab = 1;
+                    selectedUserPlaylistId = null;
                     return true;
                 }
                 if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 104 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 149
                         && mouseY >= subtabY && mouseY <= subtabY + 16) {
                     playlistsSubtab = 2;
+                    selectedUserPlaylistId = null;
                     return true;
                 }
 
@@ -803,9 +1025,24 @@ public class MineifyScreen extends Screen {
                 for (int i = profileScrollOffset; i < visibleProfiles.size() && rowY + rowHeight <= contentBottom; i++) {
                     if (mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= rowY && mouseY <= rowY + rowHeight) {
                         selectedProfileId = visibleProfiles.get(i).ownerId;
+                        selectedUserPlaylistId = null;
                         return true;
                     }
                     rowY += rowHeight + 2;
+                }
+
+                ProfileSummary selected = getSelectedProfile();
+                if (selected != null) {
+                    List<UserPlaylistSummary> filtered = filterPlaylistsForSubtab(selected);
+                    int detailsLeft = leftPaneRight + 8;
+                    int py = contentTop + 52;
+                    for (int i = 0; i < filtered.size() && py + 18 <= contentBottom; i++) {
+                        if (mouseX >= detailsLeft && mouseX <= panelLeft + PANEL_WIDTH - 14 && mouseY >= py && mouseY <= py + 18) {
+                            selectedUserPlaylistId = filtered.get(i).id;
+                            return true;
+                        }
+                        py += 21;
+                    }
                 }
             }
         }
@@ -847,7 +1084,7 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
-        if (showPlaylistPicker || showCreatePlaylistDialog) {
+        if (showPlaylistPicker || showCreatePlaylistDialog || showSpotifyPromptDialog) {
             return true;
         }
         if (queueDragActive) {
@@ -866,6 +1103,13 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean keyPressed(KeyInput input) {
+        if (showSpotifyPromptDialog) {
+            if (input.key() == GLFW.GLFW_KEY_ESCAPE) {
+                skipSpotifyOption();
+                return true;
+            }
+            return super.keyPressed(input);
+        }
         if (showCreatePlaylistDialog && input.key() == GLFW.GLFW_KEY_ENTER) {
             createPlaylistFromDialog();
             return true;
@@ -884,6 +1128,10 @@ public class MineifyScreen extends Screen {
         }
         if (currentTab == 2 && profileSearchField != null && profileSearchField.isFocused() && input.key() == GLFW.GLFW_KEY_ENTER) {
             requestProfilesSync(profileSearchField.getText());
+            return true;
+        }
+        if (currentTab == 2 && spotifyLinkField != null && spotifyLinkField.isFocused() && input.key() == GLFW.GLFW_KEY_ENTER) {
+            startSpotifyImport();
             return true;
         }
         return super.keyPressed(input);
@@ -930,6 +1178,7 @@ public class MineifyScreen extends Screen {
         this.playbackPaused = MineifyClient.isCachedPaused();
         this.userPlaylists = MineifyClient.getCachedUserPlaylists();
         this.profiles = MineifyClient.getCachedProfiles();
+        this.recentlyPlayed = MineifyClient.getCachedRecentlyPlayed();
         ensureSelectedProfile();
     }
 
@@ -939,6 +1188,10 @@ public class MineifyScreen extends Screen {
 
     private void requestProfilesSync(String query) {
         ClientPlayNetworking.send(new RequestProfilesPacket(query == null ? "" : query));
+    }
+
+    private void requestRecentlyPlayedSync() {
+        ClientPlayNetworking.send(new RequestRecentlyPlayedPacket());
     }
 
     public void updateSearchResults(List<SearchResult> results) {
@@ -957,6 +1210,35 @@ public class MineifyScreen extends Screen {
     public void updateProfiles(List<ProfileSummary> entries) {
         this.profiles = entries;
         ensureSelectedProfile();
+    }
+
+    public void updateRecentlyPlayed(List<RecentlyPlayedEntry> entries) {
+        this.recentlyPlayed = entries;
+    }
+
+    public void showSpotifyImportPrompt(
+            String spotifyTitle,
+            String spotifyArtist,
+            int currentIndex,
+            int totalTracks,
+            List<SpotifyChoiceOption> options
+    ) {
+        this.spotifyPromptState = new SpotifyPromptState(spotifyTitle, spotifyArtist, currentIndex, totalTracks, options);
+        this.showSpotifyPromptDialog = true;
+        updateSpotifyPromptButtons();
+    }
+
+    public void showSpotifyImportFinished(int added, int skipped, int unresolved) {
+        this.showSpotifyPromptDialog = false;
+        this.spotifyPromptState = null;
+        updateSpotifyPromptButtons();
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) {
+            client.player.sendMessage(Text.literal(
+                    "Spotify import done. Added: " + added + ", Skipped: " + skipped + ", Manual/Unresolved: " + unresolved
+            ), false);
+        }
+        requestProfilesSync(profileSearchField == null ? "" : profileSearchField.getText());
     }
 
     public void updateNowPlaying(String title, float progress, long elapsedMs, long durationMs, boolean paused) {
@@ -1096,6 +1378,50 @@ public class MineifyScreen extends Screen {
                 pendingPlaylistSearchResult.title,
                 pendingPlaylistSearchResult.duration
         ));
+    }
+
+    public static class SpotifyChoiceOption {
+        public final String videoId;
+        public final String title;
+        public final String channel;
+        public final String duration;
+
+        public SpotifyChoiceOption(String videoId, String title, String channel, String duration) {
+            this.videoId = videoId;
+            this.title = title;
+            this.channel = channel;
+            this.duration = duration;
+        }
+    }
+
+    public static class RecentlyPlayedEntry {
+        public final String videoId;
+        public final String title;
+        public final String duration;
+        public final long playedAtEpochMs;
+
+        public RecentlyPlayedEntry(String videoId, String title, String duration, long playedAtEpochMs) {
+            this.videoId = videoId;
+            this.title = title;
+            this.duration = duration;
+            this.playedAtEpochMs = playedAtEpochMs;
+        }
+    }
+
+    private static class SpotifyPromptState {
+        final String spotifyTitle;
+        final String spotifyArtist;
+        final int currentIndex;
+        final int totalTracks;
+        final List<SpotifyChoiceOption> options;
+
+        SpotifyPromptState(String spotifyTitle, String spotifyArtist, int currentIndex, int totalTracks, List<SpotifyChoiceOption> options) {
+            this.spotifyTitle = spotifyTitle;
+            this.spotifyArtist = spotifyArtist;
+            this.currentIndex = currentIndex;
+            this.totalTracks = totalTracks;
+            this.options = options;
+        }
     }
 
     @Override

@@ -56,6 +56,42 @@ public class CompanionClient {
                 });
     }
 
+    public CompletableFuture<List<SpotifyTrack>> getSpotifyPlaylistTracks(String spotifyUrl) {
+        String url = baseUrl + "/api/spotify/playlist?url=" + java.net.URLEncoder.encode(spotifyUrl, java.nio.charset.StandardCharsets.UTF_8);
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .GET()
+                .build();
+
+        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                .thenApply(response -> {
+                    List<SpotifyTrack> tracks = new ArrayList<>();
+                    try {
+                        JsonObject obj = gson.fromJson(response.body(), JsonObject.class);
+                        JsonArray arr = obj.getAsJsonArray("tracks");
+                        if (arr == null) {
+                            return tracks;
+                        }
+                        for (var el : arr) {
+                            JsonObject trackObj = el.getAsJsonObject();
+                            tracks.add(new SpotifyTrack(
+                                    trackObj.has("spotifyTrackId") ? trackObj.get("spotifyTrackId").getAsString() : "",
+                                    trackObj.has("title") ? trackObj.get("title").getAsString() : "",
+                                    trackObj.has("artist") ? trackObj.get("artist").getAsString() : "",
+                                    trackObj.has("query") ? trackObj.get("query").getAsString() : ""
+                            ));
+                        }
+                    } catch (Exception e) {
+                        Mineify.LOGGER.error("Failed to parse Spotify playlist response", e);
+                    }
+                    return tracks;
+                })
+                .exceptionally(e -> {
+                    Mineify.LOGGER.error("Spotify playlist fetch failed", e);
+                    return new ArrayList<>();
+                });
+    }
+
     /**
      * Request the companion service to download a video as WAV.
      * Returns the full download URL that clients can fetch audio from.
@@ -113,4 +149,5 @@ public class CompanionClient {
     }
 
     public record SearchResult(String videoId, String title, String channel, String duration, String thumbnail) {}
+    public record SpotifyTrack(String spotifyTrackId, String title, String artist, String query) {}
 }
