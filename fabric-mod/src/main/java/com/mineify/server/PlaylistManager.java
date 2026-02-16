@@ -9,6 +9,7 @@ import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
+import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
@@ -44,9 +45,12 @@ public class PlaylistManager {
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final List<PlaylistSyncPacket.Entry> playlist = new CopyOnWriteArrayList<>();
     private final Map<String, List<UserPlaylist>> userPlaylistsByOwner = new HashMap<>();
+    private final Map<String, java.util.Set<String>> likedPlaylistRefsByUser = new HashMap<>();
     private final List<RecentlyPlayedEntry> recentlyPlayed = new ArrayList<>();
     private final Map<String, SpotifyImportSession> spotifyImportSessions = new ConcurrentHashMap<>();
+    private final Map<String, SpotifyImportPreviewSession> spotifyImportPreviewSessions = new ConcurrentHashMap<>();
     private final Path userPlaylistsFile;
+    private final Path playlistLikesFile;
     private final Path recentlyPlayedFile;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "Mineify-Scheduler");
@@ -70,11 +74,15 @@ public class PlaylistManager {
         this.userPlaylistsFile = server.getRunDirectory()
                 .resolve("MineifyCompanion")
                 .resolve("playlists.json");
+        this.playlistLikesFile = server.getRunDirectory()
+                .resolve("MineifyCompanion")
+                .resolve("playlist_likes.json");
         Path configuredRecentlyPath = Path.of(MineifyConfig.getRecentlyPlayedPersistPath());
         this.recentlyPlayedFile = configuredRecentlyPath.isAbsolute()
                 ? configuredRecentlyPath
                 : server.getRunDirectory().resolve(configuredRecentlyPath);
         loadUserPlaylists();
+        loadPlaylistLikes();
         loadRecentlyPlayed();
 
         this.progressFuture = scheduler.scheduleAtFixedRate(() -> {
@@ -213,13 +221,15 @@ public class PlaylistManager {
         String normalizedQuery = query == null ? "" : query.toLowerCase(Locale.ROOT).trim();
         List<ProfilesSyncPacket.ProfileEntry> entries = new ArrayList<>();
         String selfId = player.getUuidAsString();
+        java.util.Set<String> requesterLikedRefs = getLikedRefsFor(selfId);
 
         List<UserPlaylist> selfPlaylists = userPlaylistsByOwner.getOrDefault(selfId, List.of());
         entries.add(new ProfilesSyncPacket.ProfileEntry(
                 selfId,
                 player.getName().getString(),
                 true,
-                toProfilePlaylistEntries(selfPlaylists, true)
+                toProfilePlaylistEntries(selfPlaylists, true, requesterLikedRefs),
+                toProfileLikedPlaylistEntries(selfId, requesterLikedRefs)
         ));
 
         for (Map.Entry<String, List<UserPlaylist>> entry : userPlaylistsByOwner.entrySet()) {
@@ -229,17 +239,14 @@ public class PlaylistManager {
             }
 
             List<UserPlaylist> ownerPlaylists = entry.getValue();
-            List<ProfilesSyncPacket.PlaylistEntry> publicPlaylists = toProfilePlaylistEntries(ownerPlaylists, false);
-            if (publicPlaylists.isEmpty()) {
-                continue;
-            }
-
             String ownerName = resolveOwnerName(ownerId, ownerPlaylists);
             if (!normalizedQuery.isEmpty() && !ownerName.toLowerCase(Locale.ROOT).contains(normalizedQuery)) {
                 continue;
             }
 
-            entries.add(new ProfilesSyncPacket.ProfileEntry(ownerId, ownerName, false, publicPlaylists));
+            List<ProfilesSyncPacket.PlaylistEntry> publicPlaylists = toProfilePlaylistEntries(ownerPlaylists, false, requesterLikedRefs);
+            List<ProfilesSyncPacket.PlaylistEntry> likedPlaylists = toProfileLikedPlaylistEntries(ownerId, requesterLikedRefs);
+            entries.add(new ProfilesSyncPacket.ProfileEntry(ownerId, ownerName, false, publicPlaylists, likedPlaylists));
         }
 
         entries.sort((a, b) -> {
@@ -269,22 +276,171 @@ public class PlaylistManager {
         String playerId = player.getUuidAsString();
         spotifyImportSessions.remove(playerId);
 
-        companionClient.getSpotifyPlaylistTracks(spotifyUrl).thenAccept(tracks -> {
+        companionClient.getSpotifyPlaylistTracks(spotifyUrl).thenAccept(playlistData -> {
             server.execute(() -> {
-                if (tracks.isEmpty()) {
+                if (playlistData.tracks().isEmpty()) {
                     player.sendMessage(net.minecraft.text.Text.literal("Spotify import failed: no tracks found."), false);
                     return;
                 }
 
                 int maxTracks = Math.max(1, MineifyConfig.getSpotifyImportMaxTracksPerImport());
-                List<CompanionClient.SpotifyTrack> limitedTracks = tracks.size() > maxTracks
-                        ? new ArrayList<>(tracks.subList(0, maxTracks))
-                        : tracks;
+                List<CompanionClient.SpotifyTrack> sourceTracks = playlistData.tracks();
+                List<CompanionClient.SpotifyTrack> limitedTracks = sourceTracks.size() > maxTracks
+                        ? new ArrayList<>(sourceTracks.subList(0, maxTracks))
+                        : new ArrayList<>(sourceTracks);
                 SpotifyImportSession session = new SpotifyImportSession(playerId, targetPlaylistId, limitedTracks);
                 spotifyImportSessions.put(playerId, session);
                 processSpotifyImportNext(player);
             });
         });
+    }
+
+    public void handleRequestSpotifyImportPreview(ServerPlayerEntity player, String spotifyUrl) {
+        if (!MineifyConfig.isSpotifyImportEnabled()) {
+            player.sendMessage(net.minecraft.text.Text.literal("Spotify import is disabled by server config."), false);
+            return;
+        }
+        if (spotifyUrl == null || spotifyUrl.isBlank()) {
+            player.sendMessage(net.minecraft.text.Text.literal("Spotify link is empty."), false);
+            return;
+        }
+
+        String playerId = player.getUuidAsString();
+        spotifyImportPreviewSessions.remove(playerId);
+
+        companionClient.getSpotifyPlaylistTracks(spotifyUrl).thenAccept(playlistData -> {
+            server.execute(() -> {
+                if (playlistData.tracks().isEmpty()) {
+                    player.sendMessage(net.minecraft.text.Text.literal("Spotify import failed: no tracks found."), false);
+                    return;
+                }
+
+                int maxTracks = Math.max(1, MineifyConfig.getSpotifyImportPreviewMaxTracks());
+                List<CompanionClient.SpotifyTrack> sourceTracks = playlistData.tracks();
+                List<CompanionClient.SpotifyTrack> limitedTracks = sourceTracks.size() > maxTracks
+                        ? new ArrayList<>(sourceTracks.subList(0, maxTracks))
+                        : new ArrayList<>(sourceTracks);
+
+                Map<String, CompanionClient.SpotifyTrack> byId = new HashMap<>();
+                List<SpotifyImportPreviewPacket.TrackEntry> previewTracks = new ArrayList<>(limitedTracks.size());
+                for (int i = 0; i < limitedTracks.size(); i++) {
+                    CompanionClient.SpotifyTrack track = limitedTracks.get(i);
+                    String trackId = normalizedSpotifyTrackId(track, i);
+                    byId.put(trackId, track);
+                    previewTracks.add(new SpotifyImportPreviewPacket.TrackEntry(
+                            trackId,
+                            track.title(),
+                            track.artist(),
+                            track.query(),
+                            track.duration()
+                    ));
+                }
+
+                SpotifyImportPreviewSession session = new SpotifyImportPreviewSession(
+                        playlistData.playlistId(),
+                        playlistData.playlistName(),
+                        playlistData.ownerDisplayName(),
+                        byId
+                );
+                spotifyImportPreviewSessions.put(playerId, session);
+                ServerPlayNetworking.send(player, new SpotifyImportPreviewPacket(
+                        blankToFallback(playlistData.playlistId(), "spotify-preview"),
+                        blankToFallback(playlistData.playlistName(), "Imported Playlist"),
+                        blankToFallback(playlistData.ownerDisplayName(), "Spotify User"),
+                        previewTracks
+                ));
+            });
+        });
+    }
+
+    public void handleConfirmSpotifyImport(
+            ServerPlayerEntity player,
+            String mineifyPlaylistName,
+            boolean isPublic,
+            List<String> selectedSpotifyTrackIds
+    ) {
+        if (!MineifyConfig.isSpotifyImportEnabled()) {
+            player.sendMessage(net.minecraft.text.Text.literal("Spotify import is disabled by server config."), false);
+            return;
+        }
+        String playerId = player.getUuidAsString();
+        SpotifyImportPreviewSession preview = spotifyImportPreviewSessions.remove(playerId);
+        if (preview == null) {
+            player.sendMessage(net.minecraft.text.Text.literal("Spotify preview expired. Request preview again."), false);
+            return;
+        }
+
+        List<String> selectedIds = selectedSpotifyTrackIds == null ? List.of() : selectedSpotifyTrackIds;
+        List<CompanionClient.SpotifyTrack> selectedTracks = new ArrayList<>();
+        for (String selectedId : selectedIds) {
+            CompanionClient.SpotifyTrack track = preview.tracksById.get(selectedId);
+            if (track != null) {
+                selectedTracks.add(track);
+            }
+        }
+
+        if (selectedTracks.isEmpty()) {
+            player.sendMessage(net.minecraft.text.Text.literal("Spotify import canceled: no tracks selected."), false);
+            return;
+        }
+
+        String playlistName = mineifyPlaylistName == null ? "" : mineifyPlaylistName.trim();
+        if (playlistName.isEmpty()) {
+            playlistName = blankToFallback(preview.playlistName, "Imported Playlist");
+        }
+        if (playlistName.length() > MineifyConfig.getPlaylistsMaxNameLength()) {
+            playlistName = playlistName.substring(0, MineifyConfig.getPlaylistsMaxNameLength());
+        }
+
+        List<UserPlaylist> userPlaylists = userPlaylistsByOwner.computeIfAbsent(playerId, key -> new ArrayList<>());
+        if (userPlaylists.size() >= MineifyConfig.getPlaylistsMaxPerUser()) {
+            player.sendMessage(net.minecraft.text.Text.literal("You reached the max playlists limit (" + MineifyConfig.getPlaylistsMaxPerUser() + ")."), false);
+            return;
+        }
+
+        UserPlaylist playlistModel = new UserPlaylist(
+                UUID.randomUUID().toString(),
+                playerId,
+                player.getName().getString(),
+                playlistName,
+                isPublic
+        );
+        userPlaylists.add(playlistModel);
+        saveUserPlaylists();
+        syncUserPlaylistsToPlayer(player);
+        syncProfilesForAll();
+
+        int maxTracks = Math.max(1, MineifyConfig.getSpotifyImportMaxTracksPerImport());
+        List<CompanionClient.SpotifyTrack> limitedTracks = selectedTracks.size() > maxTracks
+                ? new ArrayList<>(selectedTracks.subList(0, maxTracks))
+                : selectedTracks;
+        spotifyImportSessions.put(playerId, new SpotifyImportSession(playerId, playlistModel.id, limitedTracks));
+        processSpotifyImportNext(player);
+    }
+
+    public void handleToggleLikedPlaylist(ServerPlayerEntity player, String playlistId, boolean liked) {
+        if (!MineifyConfig.isPlaylistsLikesEnabled() || playlistId == null || playlistId.isBlank()) {
+            return;
+        }
+        UserPlaylist playlistModel = findPlaylistById(playlistId);
+        if (playlistModel == null) {
+            return;
+        }
+        if (!playlistModel.isPublic && !playlistModel.ownerId.equals(player.getUuidAsString())) {
+            return;
+        }
+
+        java.util.Set<String> likedRefs = likedPlaylistRefsByUser.computeIfAbsent(player.getUuidAsString(), key -> new java.util.HashSet<>());
+        if (liked) {
+            likedRefs.add(playlistId);
+        } else {
+            likedRefs.remove(playlistId);
+            if (likedRefs.isEmpty()) {
+                likedPlaylistRefsByUser.remove(player.getUuidAsString());
+            }
+        }
+        savePlaylistLikes();
+        syncProfilesForAll();
     }
 
     public void handleResolveSpotifyImportChoice(ServerPlayerEntity player, String videoId) {
@@ -381,6 +537,7 @@ public class PlaylistManager {
         if (addTrackToUserPlaylistInternal(player.getUuidAsString(), playlistId, videoId, title, duration)) {
             saveUserPlaylists();
             syncUserPlaylistsToPlayer(player);
+            syncProfilesForAll();
         }
     }
 
@@ -608,6 +765,7 @@ public class PlaylistManager {
             spotifyImportSessions.remove(player.getUuidAsString());
             saveUserPlaylists();
             syncUserPlaylistsToPlayer(player);
+            syncProfilesForAll();
             ServerPlayNetworking.send(player, new SpotifyImportFinishedPacket(
                     session.addedCount,
                     session.skippedCount,
@@ -723,6 +881,17 @@ public class PlaylistManager {
         return null;
     }
 
+    private UserPlaylist findPlaylistById(String playlistId) {
+        for (List<UserPlaylist> playlists : userPlaylistsByOwner.values()) {
+            for (UserPlaylist playlistModel : playlists) {
+                if (playlistModel.id.equals(playlistId)) {
+                    return playlistModel;
+                }
+            }
+        }
+        return null;
+    }
+
     private boolean addTrackToUserPlaylistInternal(String ownerId, String playlistId, String videoId, String title, String duration) {
         UserPlaylist playlistModel = findUserPlaylist(ownerId, playlistId);
         if (playlistModel == null) {
@@ -735,20 +904,81 @@ public class PlaylistManager {
         return true;
     }
 
-    private List<ProfilesSyncPacket.PlaylistEntry> toProfilePlaylistEntries(List<UserPlaylist> playlists, boolean includePrivate) {
+    private List<ProfilesSyncPacket.PlaylistEntry> toProfilePlaylistEntries(
+            List<UserPlaylist> playlists,
+            boolean includePrivate,
+            java.util.Set<String> requesterLikedRefs
+    ) {
         List<ProfilesSyncPacket.PlaylistEntry> entries = new ArrayList<>();
         for (UserPlaylist playlistModel : playlists) {
             if (!includePrivate && !playlistModel.isPublic) {
                 continue;
             }
+            List<ProfilesSyncPacket.TrackEntry> tracks = new ArrayList<>(playlistModel.tracks.size());
+            for (UserPlaylistTrack track : playlistModel.tracks) {
+                tracks.add(new ProfilesSyncPacket.TrackEntry(
+                        blankToFallback(track.videoId, ""),
+                        blankToFallback(track.title, "Unknown track"),
+                        blankToFallback(track.duration, "")
+                ));
+            }
             entries.add(new ProfilesSyncPacket.PlaylistEntry(
                     playlistModel.id,
                     playlistModel.name,
                     playlistModel.isPublic,
-                    playlistModel.tracks.size()
+                    playlistModel.tracks.size(),
+                    blankToFallback(playlistModel.ownerId, ""),
+                    blankToFallback(playlistModel.ownerName, resolveOwnerName(playlistModel.ownerId, List.of())),
+                    requesterLikedRefs.contains(playlistModel.id),
+                    tracks
             ));
         }
         return entries;
+    }
+
+    private List<ProfilesSyncPacket.PlaylistEntry> toProfileLikedPlaylistEntries(
+            String profileOwnerId,
+            java.util.Set<String> requesterLikedRefs
+    ) {
+        if (!MineifyConfig.isPlaylistsLikesEnabled()) {
+            return List.of();
+        }
+        java.util.Set<String> refs = likedPlaylistRefsByUser.get(profileOwnerId);
+        if (refs == null || refs.isEmpty()) {
+            return List.of();
+        }
+        List<ProfilesSyncPacket.PlaylistEntry> entries = new ArrayList<>();
+        for (String likedId : refs) {
+            UserPlaylist likedPlaylist = findPlaylistById(likedId);
+            if (likedPlaylist == null || !likedPlaylist.isPublic) {
+                continue;
+            }
+            entries.addAll(toProfilePlaylistEntries(List.of(likedPlaylist), true, requesterLikedRefs));
+        }
+        return entries;
+    }
+
+    private java.util.Set<String> getLikedRefsFor(String ownerId) {
+        if (!MineifyConfig.isPlaylistsLikesEnabled()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<String> refs = likedPlaylistRefsByUser.get(ownerId);
+        return refs == null ? java.util.Set.of() : refs;
+    }
+
+    private String normalizedSpotifyTrackId(CompanionClient.SpotifyTrack track, int fallbackIndex) {
+        if (track.spotifyTrackId() != null && !track.spotifyTrackId().isBlank()) {
+            return track.spotifyTrackId();
+        }
+        String base = normalizeText(track.title() + "-" + track.artist());
+        if (base.isBlank()) {
+            base = "track";
+        }
+        return base + "-" + fallbackIndex;
+    }
+
+    private String blankToFallback(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     private String resolveOwnerName(String ownerId, List<UserPlaylist> ownerPlaylists) {
@@ -767,6 +997,12 @@ public class PlaylistManager {
         return ownerId.length() > 8 ? ownerId.substring(0, 8) : ownerId;
     }
 
+    private void syncProfilesForAll() {
+        for (ServerPlayerEntity onlinePlayer : server.getPlayerManager().getPlayerList()) {
+            handleRequestProfiles(onlinePlayer, "");
+        }
+    }
+
     private void loadUserPlaylists() {
         if (!Files.exists(userPlaylistsFile)) {
             return;
@@ -783,6 +1019,32 @@ public class PlaylistManager {
             Mineify.LOGGER.info("Loaded {} user playlist groups", userPlaylistsByOwner.size());
         } catch (IOException e) {
             Mineify.LOGGER.error("Failed to load user playlists from {}", userPlaylistsFile, e);
+        }
+    }
+
+    private void loadPlaylistLikes() {
+        likedPlaylistRefsByUser.clear();
+        if (!MineifyConfig.isPlaylistsLikesEnabled()) {
+            return;
+        }
+        if (!Files.exists(playlistLikesFile)) {
+            return;
+        }
+        try (Reader reader = Files.newBufferedReader(playlistLikesFile)) {
+            Type type = new TypeToken<Map<String, java.util.Set<String>>>() {
+            }.getType();
+            Map<String, java.util.Set<String>> loaded = gson.fromJson(reader, type);
+            if (loaded != null) {
+                for (Map.Entry<String, java.util.Set<String>> entry : loaded.entrySet()) {
+                    if (entry.getValue() == null || entry.getValue().isEmpty()) {
+                        continue;
+                    }
+                    likedPlaylistRefsByUser.put(entry.getKey(), new java.util.HashSet<>(entry.getValue()));
+                }
+            }
+            Mineify.LOGGER.info("Loaded {} liked playlist owners", likedPlaylistRefsByUser.size());
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Failed to load liked playlists from {}", playlistLikesFile, e);
         }
     }
 
@@ -820,6 +1082,20 @@ public class PlaylistManager {
             }
         } catch (IOException e) {
             Mineify.LOGGER.error("Failed to save user playlists to {}", userPlaylistsFile, e);
+        }
+    }
+
+    private void savePlaylistLikes() {
+        if (!MineifyConfig.isPlaylistsLikesEnabled()) {
+            return;
+        }
+        try {
+            Files.createDirectories(playlistLikesFile.getParent());
+            try (Writer writer = Files.newBufferedWriter(playlistLikesFile)) {
+                gson.toJson(likedPlaylistRefsByUser, writer);
+            }
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Failed to save liked playlists to {}", playlistLikesFile, e);
         }
     }
 
@@ -872,8 +1148,10 @@ public class PlaylistManager {
             progressFuture.cancel(true);
         }
         saveUserPlaylists();
+        savePlaylistLikes();
         saveRecentlyPlayed();
         spotifyImportSessions.clear();
+        spotifyImportPreviewSessions.clear();
         scheduler.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
@@ -946,6 +1224,25 @@ public class PlaylistManager {
             this.ownerId = ownerId;
             this.targetPlaylistId = targetPlaylistId;
             this.tracks = tracks;
+        }
+    }
+
+    private static class SpotifyImportPreviewSession {
+        final String playlistId;
+        final String playlistName;
+        final String ownerDisplayName;
+        final Map<String, CompanionClient.SpotifyTrack> tracksById;
+
+        SpotifyImportPreviewSession(
+                String playlistId,
+                String playlistName,
+                String ownerDisplayName,
+                Map<String, CompanionClient.SpotifyTrack> tracksById
+        ) {
+            this.playlistId = playlistId;
+            this.playlistName = playlistName;
+            this.ownerDisplayName = ownerDisplayName;
+            this.tracksById = tracksById;
         }
     }
 }

@@ -21,13 +21,8 @@ public record ProfilesSyncPacket(List<ProfileEntry> profiles) implements CustomP
                             buf.writeString(profile.ownerId());
                             buf.writeString(profile.ownerName());
                             buf.writeBoolean(profile.isSelf());
-                            buf.writeVarInt(profile.playlists().size());
-                            for (PlaylistEntry playlist : profile.playlists()) {
-                                buf.writeString(playlist.id());
-                                buf.writeString(playlist.name());
-                                buf.writeBoolean(playlist.isPublic());
-                                buf.writeVarInt(playlist.trackCount());
-                            }
+                            writePlaylists(buf, profile.playlists());
+                            writePlaylists(buf, profile.likedPlaylists());
                         }
                     },
                     buf -> {
@@ -37,17 +32,9 @@ public record ProfilesSyncPacket(List<ProfileEntry> profiles) implements CustomP
                             String ownerId = buf.readString();
                             String ownerName = buf.readString();
                             boolean isSelf = buf.readBoolean();
-                            int playlistCount = buf.readVarInt();
-                            List<PlaylistEntry> playlists = new ArrayList<>(playlistCount);
-                            for (int p = 0; p < playlistCount; p++) {
-                                playlists.add(new PlaylistEntry(
-                                        buf.readString(),
-                                        buf.readString(),
-                                        buf.readBoolean(),
-                                        buf.readVarInt()
-                                ));
-                            }
-                            profiles.add(new ProfileEntry(ownerId, ownerName, isSelf, playlists));
+                            List<PlaylistEntry> playlists = readPlaylists(buf);
+                            List<PlaylistEntry> likedPlaylists = readPlaylists(buf);
+                            profiles.add(new ProfileEntry(ownerId, ownerName, isSelf, playlists, likedPlaylists));
                         }
                         return new ProfilesSyncPacket(profiles);
                     }
@@ -58,9 +45,71 @@ public record ProfilesSyncPacket(List<ProfileEntry> profiles) implements CustomP
         return ID;
     }
 
-    public record ProfileEntry(String ownerId, String ownerName, boolean isSelf, List<PlaylistEntry> playlists) {
+    private static void writePlaylists(RegistryByteBuf buf, List<PlaylistEntry> playlists) {
+        buf.writeVarInt(playlists.size());
+        for (PlaylistEntry playlist : playlists) {
+            buf.writeString(playlist.id());
+            buf.writeString(playlist.name());
+            buf.writeBoolean(playlist.isPublic());
+            buf.writeVarInt(playlist.trackCount());
+            buf.writeString(playlist.ownerId());
+            buf.writeString(playlist.ownerName());
+            buf.writeBoolean(playlist.likedByRequester());
+            buf.writeVarInt(playlist.tracks().size());
+            for (TrackEntry track : playlist.tracks()) {
+                buf.writeString(track.videoId());
+                buf.writeString(track.title());
+                buf.writeString(track.duration());
+            }
+        }
     }
 
-    public record PlaylistEntry(String id, String name, boolean isPublic, int trackCount) {
+    private static List<PlaylistEntry> readPlaylists(RegistryByteBuf buf) {
+        int count = buf.readVarInt();
+        List<PlaylistEntry> playlists = new ArrayList<>(count);
+        for (int p = 0; p < count; p++) {
+            String id = buf.readString();
+            String name = buf.readString();
+            boolean isPublic = buf.readBoolean();
+            int trackCount = buf.readVarInt();
+            String ownerId = buf.readString();
+            String ownerName = buf.readString();
+            boolean likedByRequester = buf.readBoolean();
+            int trackSize = buf.readVarInt();
+            List<TrackEntry> tracks = new ArrayList<>(trackSize);
+            for (int t = 0; t < trackSize; t++) {
+                tracks.add(new TrackEntry(
+                        buf.readString(),
+                        buf.readString(),
+                        buf.readString()
+                ));
+            }
+            playlists.add(new PlaylistEntry(id, name, isPublic, trackCount, ownerId, ownerName, likedByRequester, tracks));
+        }
+        return playlists;
+    }
+
+    public record ProfileEntry(
+            String ownerId,
+            String ownerName,
+            boolean isSelf,
+            List<PlaylistEntry> playlists,
+            List<PlaylistEntry> likedPlaylists
+    ) {
+    }
+
+    public record PlaylistEntry(
+            String id,
+            String name,
+            boolean isPublic,
+            int trackCount,
+            String ownerId,
+            String ownerName,
+            boolean likedByRequester,
+            List<TrackEntry> tracks
+    ) {
+    }
+
+    public record TrackEntry(String videoId, String title, String duration) {
     }
 }

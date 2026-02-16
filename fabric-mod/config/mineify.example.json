@@ -9,18 +9,22 @@
   "recentlyPlayed": {
     "enabled": true,
     "maxEntries": 200,
+    "uiMaxVisibleEntries": 20,
     "persistPath": "MineifyCompanion/recently_played.json",
     "broadcastOnUpdate": true
   },
   "spotifyImport": {
     "enabled": true,
+    "requireClientCredentials": true,
     "autoMatchThreshold": 0.72,
-    "maxTracksPerImport": 300
+    "maxTracksPerImport": 300,
+    "previewMaxTracks": 300
   },
   "playlists": {
     "maxPlaylistsPerUser": 25,
     "maxTracksPerPlaylist": 500,
     "maxNameLength": 50,
-    "defaultPublic": true
+    "defaultPublic": true,
+    "enableLikes": true
   }
 }

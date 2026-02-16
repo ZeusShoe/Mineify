@@ -15,15 +15,19 @@ public class MineifyConfig {
     private static int playbackProgressBroadcastIntervalMs = 1000;
     private static boolean recentlyPlayedEnabled = true;
     private static int recentlyPlayedMaxEntries = 200;
+    private static int recentlyPlayedUiMaxVisibleEntries = 20;
     private static String recentlyPlayedPersistPath = "MineifyCompanion/recently_played.json";
     private static boolean recentlyPlayedBroadcastOnUpdate = true;
     private static boolean spotifyImportEnabled = true;
+    private static boolean spotifyImportRequireClientCredentials = true;
     private static double spotifyImportAutoMatchThreshold = 0.72d;
     private static int spotifyImportMaxTracksPerImport = 300;
+    private static int spotifyImportPreviewMaxTracks = 300;
     private static int playlistsMaxPerUser = 25;
     private static int playlistsMaxTracksPerPlaylist = 500;
     private static int playlistsMaxNameLength = 50;
     private static boolean playlistsDefaultPublic = true;
+    private static boolean playlistsEnableLikes = true;
 
     static {
         load();
@@ -67,6 +71,9 @@ public class MineifyConfig {
                     if (recentObj.has("maxEntries")) {
                         recentlyPlayedMaxEntries = Math.max(1, recentObj.get("maxEntries").getAsInt());
                     }
+                    if (recentObj.has("uiMaxVisibleEntries")) {
+                        recentlyPlayedUiMaxVisibleEntries = Math.max(1, recentObj.get("uiMaxVisibleEntries").getAsInt());
+                    }
                     if (recentObj.has("persistPath")) {
                         recentlyPlayedPersistPath = recentObj.get("persistPath").getAsString();
                     }
@@ -82,11 +89,19 @@ public class MineifyConfig {
                     if (spotifyObj.has("enabled")) {
                         spotifyImportEnabled = spotifyObj.get("enabled").getAsBoolean();
                     }
+                    if (spotifyObj.has("requireClientCredentials")) {
+                        spotifyImportRequireClientCredentials = spotifyObj.get("requireClientCredentials").getAsBoolean();
+                    }
                     if (spotifyObj.has("autoMatchThreshold")) {
                         spotifyImportAutoMatchThreshold = Math.max(0.0d, Math.min(1.0d, spotifyObj.get("autoMatchThreshold").getAsDouble()));
                     }
                     if (spotifyObj.has("maxTracksPerImport")) {
                         spotifyImportMaxTracksPerImport = Math.max(1, spotifyObj.get("maxTracksPerImport").getAsInt());
+                    }
+                    if (spotifyObj.has("previewMaxTracks")) {
+                        spotifyImportPreviewMaxTracks = Math.max(1, spotifyObj.get("previewMaxTracks").getAsInt());
+                    } else {
+                        spotifyImportPreviewMaxTracks = spotifyImportMaxTracksPerImport;
                     }
                 }
 
@@ -105,6 +120,9 @@ public class MineifyConfig {
                     }
                     if (playlistsObj.has("defaultPublic")) {
                         playlistsDefaultPublic = playlistsObj.get("defaultPublic").getAsBoolean();
+                    }
+                    if (playlistsObj.has("enableLikes")) {
+                        playlistsEnableLikes = playlistsObj.get("enableLikes").getAsBoolean();
                     }
                 }
             } catch (IOException e) {
@@ -141,6 +159,10 @@ public class MineifyConfig {
         return recentlyPlayedMaxEntries;
     }
 
+    public static int getRecentlyPlayedUiMaxVisibleEntries() {
+        return recentlyPlayedUiMaxVisibleEntries;
+    }
+
     public static String getRecentlyPlayedPersistPath() {
         return recentlyPlayedPersistPath;
     }
@@ -161,6 +183,14 @@ public class MineifyConfig {
         return spotifyImportMaxTracksPerImport;
     }
 
+    public static boolean isSpotifyImportRequireClientCredentials() {
+        return spotifyImportRequireClientCredentials;
+    }
+
+    public static int getSpotifyImportPreviewMaxTracks() {
+        return spotifyImportPreviewMaxTracks;
+    }
+
     public static int getPlaylistsMaxPerUser() {
         return playlistsMaxPerUser;
     }
@@ -175,5 +205,9 @@ public class MineifyConfig {
 
     public static boolean isPlaylistsDefaultPublic() {
         return playlistsDefaultPublic;
+    }
+
+    public static boolean isPlaylistsLikesEnabled() {
+        return playlistsEnableLikes;
     }
 }

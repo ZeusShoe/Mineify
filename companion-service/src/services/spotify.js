@@ -18,7 +18,21 @@ function extractPlaylistId(spotifyUrl) {
 }
 
 async function getSpotifyAccessToken() {
-    const response = await fetch('https://open.spotify.com/get_access_token?reason=transport&productType=web_player');
+    const clientId = process.env.SPOTIFY_CLIENT_ID;
+    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+        throw new Error('Spotify credentials missing. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET.');
+    }
+
+    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    const response = await fetch('https://accounts.spotify.com/api/token', {
+        method: 'POST',
+        headers: {
+            Authorization: `Basic ${auth}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials'
+    });
     if (!response.ok) {
         throw new Error(`Spotify access token request failed with status ${response.status}`);
     }
@@ -44,6 +58,19 @@ async function fetchPlaylistTracksPage(playlistId, accessToken, offset) {
     return response.json();
 }
 
+async function fetchPlaylistMetadata(playlistId, accessToken) {
+    const endpoint = `https://api.spotify.com/v1/playlists/${playlistId}`;
+    const response = await fetch(endpoint, {
+        headers: {
+            Authorization: `Bearer ${accessToken}`
+        }
+    });
+    if (!response.ok) {
+        throw new Error(`Spotify playlist metadata request failed with status ${response.status}`);
+    }
+    return response.json();
+}
+
 export async function getSpotifyPlaylistTracks(spotifyUrl) {
     const playlistId = extractPlaylistId(spotifyUrl);
     if (!playlistId) {
@@ -51,6 +78,7 @@ export async function getSpotifyPlaylistTracks(spotifyUrl) {
     }
 
     const accessToken = await getSpotifyAccessToken();
+    const metadata = await fetchPlaylistMetadata(playlistId, accessToken);
     const tracks = [];
     let offset = 0;
     let total = 0;
@@ -74,7 +102,8 @@ export async function getSpotifyPlaylistTracks(spotifyUrl) {
                 spotifyTrackId: track.id || '',
                 title: track.name,
                 artist: artistText,
-                query: artistText ? `${track.name} ${artistText}` : track.name
+                query: artistText ? `${track.name} ${artistText}` : track.name,
+                duration: track.duration_ms ? `${Math.floor(track.duration_ms / 60000)}:${String(Math.floor((track.duration_ms % 60000) / 1000)).padStart(2, '0')}` : ''
             });
         }
 
@@ -86,6 +115,8 @@ export async function getSpotifyPlaylistTracks(spotifyUrl) {
 
     return {
         playlistId,
+        playlistName: metadata?.name || 'Imported Playlist',
+        ownerDisplayName: metadata?.owner?.display_name || 'Spotify User',
         trackCount: tracks.length,
         tracks
     };

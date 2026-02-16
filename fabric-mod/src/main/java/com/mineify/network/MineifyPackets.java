@@ -3,6 +3,7 @@ package com.mineify.network;
 import com.mineify.Mineify;
 import com.mineify.network.packets.AddToPlaylistPacket;
 import com.mineify.network.packets.AddToUserPlaylistPacket;
+import com.mineify.network.packets.ConfirmSpotifyImportPacket;
 import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
@@ -11,13 +12,16 @@ import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
 import com.mineify.network.packets.RequestRecentlyPlayedPacket;
 import com.mineify.network.packets.RequestProfilesPacket;
+import com.mineify.network.packets.RequestSpotifyImportPreviewPacket;
 import com.mineify.network.packets.RequestUserPlaylistsPacket;
 import com.mineify.network.packets.ResolveSpotifyImportChoicePacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
 import com.mineify.network.packets.SpotifyImportFinishedPacket;
+import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.StartSpotifyImportPacket;
+import com.mineify.network.packets.ToggleLikedPlaylistPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -35,8 +39,11 @@ public class MineifyPackets {
         PayloadTypeRegistry.playC2S().register(AddToUserPlaylistPacket.ID, AddToUserPlaylistPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(RequestProfilesPacket.ID, RequestProfilesPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(StartSpotifyImportPacket.ID, StartSpotifyImportPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(RequestSpotifyImportPreviewPacket.ID, RequestSpotifyImportPreviewPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(ConfirmSpotifyImportPacket.ID, ConfirmSpotifyImportPacket.CODEC);
         PayloadTypeRegistry.playC2S().register(ResolveSpotifyImportChoicePacket.ID, ResolveSpotifyImportChoicePacket.CODEC);
         PayloadTypeRegistry.playC2S().register(RequestRecentlyPlayedPacket.ID, RequestRecentlyPlayedPacket.CODEC);
+        PayloadTypeRegistry.playC2S().register(ToggleLikedPlaylistPacket.ID, ToggleLikedPlaylistPacket.CODEC);
 
         // Register S2C (server-to-client) packet types
         PayloadTypeRegistry.playS2C().register(
@@ -70,6 +77,10 @@ public class MineifyPackets {
         PayloadTypeRegistry.playS2C().register(
                 SpotifyImportPromptPacket.ID,
                 SpotifyImportPromptPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                SpotifyImportPreviewPacket.ID,
+                SpotifyImportPreviewPacket.CODEC
         );
         PayloadTypeRegistry.playS2C().register(
                 SpotifyImportFinishedPacket.ID,
@@ -185,6 +196,24 @@ public class MineifyPackets {
             });
         });
 
+        ServerPlayNetworking.registerGlobalReceiver(RequestSpotifyImportPreviewPacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleRequestSpotifyImportPreview(context.player(), payload.spotifyUrl());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(ConfirmSpotifyImportPacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleConfirmSpotifyImport(context.player(), payload.mineifyPlaylistName(), payload.isPublic(), payload.selectedSpotifyTrackIds());
+                }
+            });
+        });
+
         ServerPlayNetworking.registerGlobalReceiver(ResolveSpotifyImportChoicePacket.ID, (payload, context) -> {
             context.server().execute(() -> {
                 var manager = Mineify.getPlaylistManager();
@@ -199,6 +228,15 @@ public class MineifyPackets {
                 var manager = Mineify.getPlaylistManager();
                 if (manager != null) {
                     manager.handleRequestRecentlyPlayed(context.player());
+                }
+            });
+        });
+
+        ServerPlayNetworking.registerGlobalReceiver(ToggleLikedPlaylistPacket.ID, (payload, context) -> {
+            context.server().execute(() -> {
+                var manager = Mineify.getPlaylistManager();
+                if (manager != null) {
+                    manager.handleToggleLikedPlaylist(context.player(), payload.playlistId(), payload.liked());
                 }
             });
         });

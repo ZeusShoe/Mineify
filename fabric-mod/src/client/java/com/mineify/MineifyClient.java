@@ -10,6 +10,7 @@ import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.SpotifyImportFinishedPacket;
+import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.SearchResultsPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
@@ -167,20 +168,55 @@ public class MineifyClient implements ClientModInitializer {
             context.client().execute(() -> {
                 List<MineifyScreen.ProfileSummary> profiles = new ArrayList<>();
                 for (var profile : payload.profiles()) {
-                    List<MineifyScreen.UserPlaylistSummary> summaries = new ArrayList<>();
+                    List<MineifyScreen.ProfilePlaylistSummary> summaries = new ArrayList<>();
                     for (var playlist : profile.playlists()) {
-                        summaries.add(new MineifyScreen.UserPlaylistSummary(
+                        List<MineifyScreen.ProfileTrackEntry> tracks = new ArrayList<>();
+                        for (var track : playlist.tracks()) {
+                            tracks.add(new MineifyScreen.ProfileTrackEntry(
+                                    track.videoId(),
+                                    track.title(),
+                                    track.duration()
+                            ));
+                        }
+                        summaries.add(new MineifyScreen.ProfilePlaylistSummary(
                                 playlist.id(),
                                 playlist.name(),
                                 playlist.isPublic(),
-                                playlist.trackCount()
+                                playlist.trackCount(),
+                                playlist.ownerId(),
+                                playlist.ownerName(),
+                                playlist.likedByRequester(),
+                                tracks
+                        ));
+                    }
+
+                    List<MineifyScreen.ProfilePlaylistSummary> likedSummaries = new ArrayList<>();
+                    for (var playlist : profile.likedPlaylists()) {
+                        List<MineifyScreen.ProfileTrackEntry> tracks = new ArrayList<>();
+                        for (var track : playlist.tracks()) {
+                            tracks.add(new MineifyScreen.ProfileTrackEntry(
+                                    track.videoId(),
+                                    track.title(),
+                                    track.duration()
+                            ));
+                        }
+                        likedSummaries.add(new MineifyScreen.ProfilePlaylistSummary(
+                                playlist.id(),
+                                playlist.name(),
+                                playlist.isPublic(),
+                                playlist.trackCount(),
+                                playlist.ownerId(),
+                                playlist.ownerName(),
+                                playlist.likedByRequester(),
+                                tracks
                         ));
                     }
                     profiles.add(new MineifyScreen.ProfileSummary(
                             profile.ownerId(),
                             profile.ownerName(),
                             profile.isSelf(),
-                            summaries
+                            summaries,
+                            likedSummaries
                     ));
                 }
                 cachedProfiles = profiles;
@@ -229,6 +265,29 @@ public class MineifyClient implements ClientModInitializer {
                             payload.totalTracks(),
                             options
                     );
+                }
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(SpotifyImportPreviewPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                List<MineifyScreen.SpotifyPreviewTrack> tracks = new ArrayList<>();
+                for (var track : payload.tracks()) {
+                    tracks.add(new MineifyScreen.SpotifyPreviewTrack(
+                            track.spotifyTrackId(),
+                            track.title(),
+                            track.artist(),
+                            track.query(),
+                            track.duration()
+                    ));
+                }
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.showSpotifyImportPreview(new MineifyScreen.SpotifyImportPreviewState(
+                            payload.spotifyPlaylistId(),
+                            payload.spotifyPlaylistName(),
+                            payload.spotifyOwnerName(),
+                            tracks
+                    ));
                 }
             });
         });

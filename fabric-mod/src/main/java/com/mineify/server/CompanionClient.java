@@ -56,7 +56,7 @@ public class CompanionClient {
                 });
     }
 
-    public CompletableFuture<List<SpotifyTrack>> getSpotifyPlaylistTracks(String spotifyUrl) {
+    public CompletableFuture<SpotifyPlaylist> getSpotifyPlaylistTracks(String spotifyUrl) {
         String url = baseUrl + "/api/spotify/playlist?url=" + java.net.URLEncoder.encode(spotifyUrl, java.nio.charset.StandardCharsets.UTF_8);
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -68,9 +68,12 @@ public class CompanionClient {
                     List<SpotifyTrack> tracks = new ArrayList<>();
                     try {
                         JsonObject obj = gson.fromJson(response.body(), JsonObject.class);
+                        String playlistId = obj.has("playlistId") ? obj.get("playlistId").getAsString() : "";
+                        String playlistName = obj.has("playlistName") ? obj.get("playlistName").getAsString() : "Imported Playlist";
+                        String ownerName = obj.has("ownerDisplayName") ? obj.get("ownerDisplayName").getAsString() : "Spotify User";
                         JsonArray arr = obj.getAsJsonArray("tracks");
                         if (arr == null) {
-                            return tracks;
+                            return new SpotifyPlaylist(playlistId, playlistName, ownerName, tracks);
                         }
                         for (var el : arr) {
                             JsonObject trackObj = el.getAsJsonObject();
@@ -78,17 +81,19 @@ public class CompanionClient {
                                     trackObj.has("spotifyTrackId") ? trackObj.get("spotifyTrackId").getAsString() : "",
                                     trackObj.has("title") ? trackObj.get("title").getAsString() : "",
                                     trackObj.has("artist") ? trackObj.get("artist").getAsString() : "",
-                                    trackObj.has("query") ? trackObj.get("query").getAsString() : ""
+                                    trackObj.has("query") ? trackObj.get("query").getAsString() : "",
+                                    trackObj.has("duration") ? trackObj.get("duration").getAsString() : ""
                             ));
                         }
+                        return new SpotifyPlaylist(playlistId, playlistName, ownerName, tracks);
                     } catch (Exception e) {
                         Mineify.LOGGER.error("Failed to parse Spotify playlist response", e);
+                        return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks);
                     }
-                    return tracks;
                 })
                 .exceptionally(e -> {
                     Mineify.LOGGER.error("Spotify playlist fetch failed", e);
-                    return new ArrayList<>();
+                    return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", new ArrayList<>());
                 });
     }
 
@@ -149,5 +154,6 @@ public class CompanionClient {
     }
 
     public record SearchResult(String videoId, String title, String channel, String duration, String thumbnail) {}
-    public record SpotifyTrack(String spotifyTrackId, String title, String artist, String query) {}
+    public record SpotifyTrack(String spotifyTrackId, String title, String artist, String query, String duration) {}
+    public record SpotifyPlaylist(String playlistId, String playlistName, String ownerDisplayName, List<SpotifyTrack> tracks) {}
 }
