@@ -25,11 +25,13 @@ import java.io.Reader;
 import java.io.Writer;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
@@ -44,6 +46,7 @@ public class PlaylistManager {
     private final CompanionClient companionClient;
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final List<PlaylistSyncPacket.Entry> playlist = new CopyOnWriteArrayList<>();
+    private final Deque<QueueSnapshot> queueUndoHistory = new ArrayDeque<>();
     private final Map<String, List<UserPlaylist>> userPlaylistsByOwner = new HashMap<>();
     private final Map<String, java.util.Set<String>> likedPlaylistRefsByUser = new HashMap<>();
     private final List<RecentlyPlayedEntry> recentlyPlayed = new ArrayList<>();
@@ -67,6 +70,48 @@ public class PlaylistManager {
     private String currentDownloadUrl = null;
     private ScheduledFuture<?> advanceFuture;
     private ScheduledFuture<?> progressFuture;
+
+    private void pushQueueUndoSnapshot(String reason) {
+        int max = Math.max(1, MineifyConfig.getQueueUndoMaxHistory());
+        String nowPlayingVideoId = null;
+        if (currentIndex >= 0 && currentIndex < playlist.size()) {
+            nowPlayingVideoId = playlist.get(currentIndex).videoId();
+        }
+        queueUndoHistory.addFirst(new QueueSnapshot(new ArrayList<>(playlist), nowPlayingVideoId, reason));
+        while (queueUndoHistory.size() > max) {
+            queueUndoHistory.removeLast();
+        }
+    }
+
+    private boolean restoreLatestQueueSnapshot() {
+        QueueSnapshot snapshot = queueUndoHistory.pollFirst();
+        if (snapshot == null) {
+            return false;
+        }
+        playlist.clear();
+        playlist.addAll(snapshot.entries);
+        if (snapshot.nowPlayingVideoId != null && !snapshot.nowPlayingVideoId.isBlank()) {
+            int idx = -1;
+            for (int i = 0; i < playlist.size(); i++) {
+                if (snapshot.nowPlayingVideoId.equals(playlist.get(i).videoId())) {
+                    idx = i;
+                    break;
+                }
+            }
+            currentIndex = idx;
+            isPlaying = idx >= 0;
+        } else {
+            currentIndex = -1;
+            isPlaying = false;
+            paused = false;
+            pausedElapsedMs = 0;
+            currentDownloadUrl = null;
+            playbackStartNanos = 0;
+            currentTrackDurationMs = 0;
+        }
+        syncToAll();
+        return true;
+    }
 
     public PlaylistManager(MinecraftServer server, CompanionClient companionClient) {
         this.server = server;
@@ -115,6 +160,7 @@ public class PlaylistManager {
             player.sendMessage(net.minecraft.text.Text.literal("Queue is full (max " + MineifyConfig.getMaxPlaylistSize() + ")."), false);
             return;
         }
+        pushQueueUndoSnapshot("add");
 
         PlaylistSyncPacket.Entry entry = new PlaylistSyncPacket.Entry(
                 videoId, title, duration, player.getName().getString()
@@ -143,6 +189,7 @@ public class PlaylistManager {
             Mineify.LOGGER.warn("{} tried to remove {} but doesn't own it or it doesn't exist", playerName, videoId);
             return;
         }
+        pushQueueUndoSnapshot("remove");
 
         playlist.remove(removeIndex);
         Mineify.LOGGER.info("{} removed {} from playlist", playerName, videoId);
@@ -168,8 +215,17 @@ public class PlaylistManager {
             return;
         }
 
+        boolean moderatorOnly = MineifyConfig.isModerationRequireOpForGlobalQueueControls();
+        boolean isModerator = !moderatorOnly
+                || (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()
+                && playlist.get(currentIndex).addedBy().equals(player.getName().getString()));
+
         switch (action.toLowerCase()) {
             case "skip" -> {
+                if (moderatorOnly && !isModerator) {
+                    player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to skip tracks."), false);
+                    return;
+                }
                 Mineify.LOGGER.info("Player {} requested skip", player.getName().getString());
                 if (isPlaying) {
                     if (advanceFuture != null) {
@@ -179,12 +235,25 @@ public class PlaylistManager {
                 }
             }
             case "pause" -> {
+                if (moderatorOnly && !isModerator) {
+                    player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to pause playback."), false);
+                    return;
+                }
                 Mineify.LOGGER.info("Player {} requested pause", player.getName().getString());
                 pausePlayback();
             }
             case "resume" -> {
+                if (moderatorOnly && !isModerator) {
+                    player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to resume playback."), false);
+                    return;
+                }
                 Mineify.LOGGER.info("Player {} requested resume", player.getName().getString());
                 resumePlayback();
+            }
+            case "undo_queue" -> {
+                if (!restoreLatestQueueSnapshot()) {
+                    player.sendMessage(net.minecraft.text.Text.literal("Nothing to undo."), false);
+                }
             }
             default -> Mineify.LOGGER.warn("Unknown playback action '{}'", action);
         }
@@ -195,6 +264,16 @@ public class PlaylistManager {
         if (fromIndex < 0 || toIndex < 0 || fromIndex >= size || toIndex >= size || fromIndex == toIndex) {
             return;
         }
+        if (isPlaying && toIndex == 0) {
+            return;
+        }
+        PlaylistSyncPacket.Entry fromEntry = playlist.get(fromIndex);
+        boolean isModerator = !MineifyConfig.isModerationRequireOpForGlobalQueueControls()
+                || fromEntry.addedBy().equals(player.getName().getString());
+        if (!isModerator && !fromEntry.addedBy().equals(player.getName().getString())) {
+            return;
+        }
+        pushQueueUndoSnapshot("reorder");
 
         PlaylistSyncPacket.Entry moved = playlist.remove(fromIndex);
         playlist.add(toIndex, moved);
@@ -1155,6 +1234,18 @@ public class PlaylistManager {
         scheduler.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
+    }
+
+    private static class QueueSnapshot {
+        final List<PlaylistSyncPacket.Entry> entries;
+        final String nowPlayingVideoId;
+        final String reason;
+
+        QueueSnapshot(List<PlaylistSyncPacket.Entry> entries, String nowPlayingVideoId, String reason) {
+            this.entries = entries;
+            this.nowPlayingVideoId = nowPlayingVideoId;
+            this.reason = reason;
+        }
     }
 
     private static class UserPlaylist {

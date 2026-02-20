@@ -13,6 +13,10 @@ public class MineifyConfig {
     private static String audioSessionFolder = "./mineify-sessions";
     private static int playbackTrackEndPaddingMs = 2000;
     private static int playbackProgressBroadcastIntervalMs = 1000;
+    private static int playbackCrossfadeMs = 180;
+    private static int queueUndoMaxHistory = 20;
+    private static boolean moderationRequireOpForGlobalQueueControls = true;
+    private static boolean uiCompactDefault = false;
     private static boolean recentlyPlayedEnabled = true;
     private static int recentlyPlayedMaxEntries = 200;
     private static int recentlyPlayedUiMaxVisibleEntries = 20;
@@ -58,6 +62,15 @@ public class MineifyConfig {
                     }
                     if (playbackObj.has("progressBroadcastIntervalMs")) {
                         playbackProgressBroadcastIntervalMs = Math.max(250, playbackObj.get("progressBroadcastIntervalMs").getAsInt());
+                    }
+                    if (playbackObj.has("crossfadeMs")) {
+                        playbackCrossfadeMs = Math.max(0, playbackObj.get("crossfadeMs").getAsInt());
+                    }
+                    if (playbackObj.has("queueUndoMaxHistory")) {
+                        queueUndoMaxHistory = Math.max(1, playbackObj.get("queueUndoMaxHistory").getAsInt());
+                    }
+                    if (playbackObj.has("moderationRequireOpForGlobalQueueControls")) {
+                        moderationRequireOpForGlobalQueueControls = playbackObj.get("moderationRequireOpForGlobalQueueControls").getAsBoolean();
                     }
                 }
 
@@ -125,6 +138,13 @@ public class MineifyConfig {
                         playlistsEnableLikes = playlistsObj.get("enableLikes").getAsBoolean();
                     }
                 }
+
+                JsonObject uiObj = obj.has("ui") && obj.get("ui").isJsonObject()
+                        ? obj.getAsJsonObject("ui")
+                        : null;
+                if (uiObj != null && uiObj.has("compactDefault")) {
+                    uiCompactDefault = uiObj.get("compactDefault").getAsBoolean();
+                }
             } catch (IOException e) {
                 Mineify.LOGGER.warn("Failed to load mineify config, using defaults", e);
             }
@@ -149,6 +169,22 @@ public class MineifyConfig {
 
     public static int getPlaybackProgressBroadcastIntervalMs() {
         return playbackProgressBroadcastIntervalMs;
+    }
+
+    public static int getPlaybackCrossfadeMs() {
+        return playbackCrossfadeMs;
+    }
+
+    public static int getQueueUndoMaxHistory() {
+        return queueUndoMaxHistory;
+    }
+
+    public static boolean isModerationRequireOpForGlobalQueueControls() {
+        return moderationRequireOpForGlobalQueueControls;
+    }
+
+    public static boolean isUiCompactDefault() {
+        return uiCompactDefault;
     }
 
     public static boolean isRecentlyPlayedEnabled() {

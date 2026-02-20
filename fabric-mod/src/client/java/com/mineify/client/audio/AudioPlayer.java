@@ -1,6 +1,7 @@
 package com.mineify.client.audio;
 
 import com.mineify.MineifyClient;
+import com.mineify.MineifyConfig;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 
@@ -43,7 +44,7 @@ public class AudioPlayer {
 
     public void play(String downloadUrl, String title, long serverElapsedMs, long packetReceivedAtNanos) {
         executor.submit(() -> {
-            stopInternal();
+            fadeOutAndStopCurrent();
             try {
                 MineifyClient.LOGGER.info("Downloading audio from: {}", downloadUrl);
                 URL url = new URL(downloadUrl);
@@ -83,7 +84,7 @@ public class AudioPlayer {
                 currentTitle = title;
                 playing = false;
                 paused = false;
-                applyVolume(clip);
+                setClipVolume(clip, 0.0f);
 
                 long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
                 if (startOffsetMs > 0) {
@@ -106,6 +107,7 @@ public class AudioPlayer {
                 } else {
                     clip.start();
                     playing = true;
+                    fadeToVolume(clip, volume, MineifyConfig.getPlaybackCrossfadeMs());
                     MineifyClient.LOGGER.info("Playing: {}", title);
                 }
             } catch (Exception e) {
@@ -139,6 +141,7 @@ public class AudioPlayer {
         pendingPause = true;
         Clip clip = currentClip;
         if (clip != null && clip.isOpen() && clip.isRunning()) {
+            fadeToVolume(clip, 0.0f, Math.min(250, MineifyConfig.getPlaybackCrossfadeMs()));
             suppressStopCallback = true;
             clip.stop();
             playing = false;
@@ -150,7 +153,9 @@ public class AudioPlayer {
         pendingPause = false;
         Clip clip = currentClip;
         if (clip != null && clip.isOpen() && paused) {
+            setClipVolume(clip, 0.0f);
             clip.start();
+            fadeToVolume(clip, volume, Math.min(250, MineifyConfig.getPlaybackCrossfadeMs()));
             paused = false;
             playing = true;
         }
@@ -168,6 +173,14 @@ public class AudioPlayer {
             clip.close();
             currentClip = null;
         }
+    }
+
+    private void fadeOutAndStopCurrent() {
+        Clip clip = currentClip;
+        if (clip != null && clip.isOpen()) {
+            fadeToVolume(clip, 0.0f, MineifyConfig.getPlaybackCrossfadeMs());
+        }
+        stopInternal();
     }
 
     public boolean isPlaying() {
@@ -203,15 +216,44 @@ public class AudioPlayer {
     }
 
     private void applyVolume(Clip clip) {
+        setClipVolume(clip, volume);
+    }
+
+    private void setClipVolume(Clip clip, float linearVolume) {
         try {
             FloatControl control = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
-            float dB = (float) (20.0 * Math.log10(Math.max(volume, 0.0001)));
+            float dB = (float) (20.0 * Math.log10(Math.max(linearVolume, 0.0001)));
             dB = Math.max(dB, control.getMinimum());
             dB = Math.min(dB, control.getMaximum());
             control.setValue(dB);
         } catch (IllegalArgumentException e) {
             // Volume control not available
         }
+    }
+
+    private void fadeToVolume(Clip clip, float targetVolume, int durationMs) {
+        if (clip == null || !clip.isOpen()) {
+            return;
+        }
+        int safeMs = Math.max(0, durationMs);
+        if (safeMs == 0) {
+            setClipVolume(clip, targetVolume);
+            return;
+        }
+        int steps = Math.max(1, Math.min(24, safeMs / 15));
+        float start = this.volume;
+        for (int i = 1; i <= steps; i++) {
+            float t = i / (float) steps;
+            float v = start + (targetVolume - start) * t;
+            setClipVolume(clip, v);
+            try {
+                Thread.sleep(Math.max(5L, safeMs / (long) steps));
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        setClipVolume(clip, targetVolume);
     }
 
     public void shutdown() {

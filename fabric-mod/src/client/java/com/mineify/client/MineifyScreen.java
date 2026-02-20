@@ -74,6 +74,8 @@ public class MineifyScreen extends Screen {
     private ButtonWidget searchButton;
     private ButtonWidget pauseResumeButton;
     private ButtonWidget skipButton;
+    private ButtonWidget compactModeButton;
+    private ButtonWidget undoQueueButton;
     private SliderWidget volumeSlider;
     private TextFieldWidget newPlaylistNameField;
     private TextFieldWidget profileSearchField;
@@ -104,6 +106,7 @@ public class MineifyScreen extends Screen {
     private int profilePlaylistScrollOffset = 0;
     private int recentlyPlayedScrollOffset = 0;
     private int rightPaneTab = 0; // 0: Player's Playlists, 1: Player's Liked Playlists
+    private boolean compactMode = MineifyConfig.isUiCompactDefault();
 
     private String nowPlaying = null;
     private float playbackProgress = 0f;
@@ -127,6 +130,11 @@ public class MineifyScreen extends Screen {
     private SpotifyPromptState spotifyPromptState = null;
     private SpotifyImportPreviewState spotifyImportPreviewState = null;
     private Set<String> selectedSpotifyTrackIds = new LinkedHashSet<>();
+    private Set<Integer> selectedDetailTrackIndexes = new LinkedHashSet<>();
+    private boolean showContextMenu = false;
+    private int contextMenuX = 0;
+    private int contextMenuY = 0;
+    private ContextMenuState contextMenuState = null;
 
     private String currentPlayerName;
 
@@ -191,6 +199,16 @@ public class MineifyScreen extends Screen {
                 .build();
         this.addDrawableChild(recentTabBtn);
 
+        this.compactModeButton = ButtonWidget.builder(
+                        Text.literal(compactMode ? "Compact" : "Expanded"),
+                        button -> {
+                            compactMode = !compactMode;
+                            compactModeButton.setMessage(Text.literal(compactMode ? "Compact" : "Expanded"));
+                        })
+                .dimensions(panelLeft + PANEL_WIDTH - 78, panelTop + 5, 68, 20)
+                .build();
+        this.addDrawableChild(this.compactModeButton);
+
         int controlButtonY = bottomSectionTop + ((NOW_PLAYING_HEIGHT - 18) / 2);
 
         this.pauseResumeButton = ButtonWidget.builder(Text.literal("||"), button -> {
@@ -202,6 +220,15 @@ public class MineifyScreen extends Screen {
             ClientPlayNetworking.send(new PlaybackControlPacket("skip"));
         }).dimensions(controlsLeft + 54, controlButtonY, 48, 18).build();
         this.addDrawableChild(this.skipButton);
+
+        this.undoQueueButton = ButtonWidget.builder(Text.literal("Undo"), button -> {
+                    ClientPlayNetworking.send(new PlaybackControlPacket("undo_queue"));
+                })
+                .dimensions(panelLeft + PANEL_WIDTH - 60, panelTop + CONTENT_TOP_NO_SEARCH - 18, 50, 14)
+                .build();
+        this.undoQueueButton.visible = false;
+        this.undoQueueButton.active = false;
+        this.addDrawableChild(this.undoQueueButton);
 
         this.volumeSlider = new SliderWidget(
                 panelLeft + 10,
@@ -405,6 +432,11 @@ public class MineifyScreen extends Screen {
             importSpotifyButton.visible = showSpotifyControls;
             importSpotifyButton.active = showSpotifyControls && isValidSpotifyUrl(spotifyLinkField.getText());
         }
+        if (undoQueueButton != null) {
+            boolean showUndo = currentTab == 1 && !hasBlockingModal && !playlist.isEmpty();
+            undoQueueButton.visible = showUndo;
+            undoQueueButton.active = showUndo;
+        }
 
         if (currentTab == 0) {
             renderSearchTab(context, panelLeft, panelTop, mouseX, mouseY);
@@ -420,6 +452,7 @@ public class MineifyScreen extends Screen {
         renderPlaylistModals(context, mouseX, mouseY);
         renderSpotifyPreviewModal(context, mouseX, mouseY);
         renderSpotifyPromptModal(context);
+        renderContextMenu(context, mouseX, mouseY);
         super.render(context, mouseX, mouseY, delta);
     }
 
@@ -427,10 +460,18 @@ public class MineifyScreen extends Screen {
         return panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING + 4);
     }
 
+    private int getSearchRowHeight() {
+        return compactMode ? 20 : LIST_ITEM_HEIGHT;
+    }
+
+    private int getQueueRowHeight() {
+        return compactMode ? 20 : LIST_ITEM_HEIGHT;
+    }
+
     private void renderSearchTab(DrawContext context, int panelLeft, int panelTop, int mouseX, int mouseY) {
         int listTop = panelTop + CONTENT_TOP_WITH_SEARCH;
         int listBottom = getListBottom(panelTop);
-        int itemHeight = LIST_ITEM_HEIGHT;
+        int itemHeight = getSearchRowHeight();
         int visibleItems = Math.max(1, (listBottom - listTop) / itemHeight);
         searchScrollOffset = Math.max(0, Math.min(searchScrollOffset, Math.max(0, searchResults.size() - visibleItems)));
 
@@ -456,8 +497,10 @@ public class MineifyScreen extends Screen {
                 int titleMaxWidth = Math.max(20, playlistButtonX - (panelLeft + 15) - 6);
                 String title = truncateText(result.title, titleMaxWidth);
                 context.drawTextWithShadow(this.textRenderer, Text.literal(title), panelLeft + 15, y + 4, 0xFFFFFFFF);
-                String channel = truncateText(result.channel, titleMaxWidth);
-                context.drawTextWithShadow(this.textRenderer, Text.literal(channel), panelLeft + 15, y + 14, 0xFF888888);
+                if (!compactMode) {
+                    String channel = truncateText(result.channel, titleMaxWidth);
+                    context.drawTextWithShadow(this.textRenderer, Text.literal(channel), panelLeft + 15, y + 14, 0xFF888888);
+                }
 
                 boolean playlistHovered = mouseX >= playlistButtonX && mouseX <= playlistButtonX + SEARCH_PLAYLIST_BUTTON_WIDTH
                         && mouseY >= buttonY && mouseY <= buttonY + 16;
@@ -502,7 +545,7 @@ public class MineifyScreen extends Screen {
     private void renderPlaylistTab(DrawContext context, int panelLeft, int panelTop, int mouseX, int mouseY) {
         int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
         int listBottom = getListBottom(panelTop);
-        int itemHeight = LIST_ITEM_HEIGHT;
+        int itemHeight = getQueueRowHeight();
         int rowStep = itemHeight;
         int visibleItems = Math.max(1, (listBottom - listTop) / rowStep);
         playlistScrollOffset = Math.max(0, Math.min(playlistScrollOffset, Math.max(0, playlist.size() - visibleItems)));
@@ -536,8 +579,12 @@ public class MineifyScreen extends Screen {
                 String title = truncateText(entry.title, titleMaxWidth);
                 context.drawTextWithShadow(this.textRenderer, Text.literal(title), panelLeft + 35, y + 4, 0xFFFFFFFF);
 
-                String addedBy = "by " + entry.addedBy;
-                context.drawTextWithShadow(this.textRenderer, Text.literal(addedBy), panelLeft + 35, y + 14, 0xFF888888);
+                String addedBy = isPlaying ? "Now Playing • by " + entry.addedBy : "by " + entry.addedBy;
+                if (!compactMode) {
+                    context.drawTextWithShadow(this.textRenderer, Text.literal(addedBy), panelLeft + 35, y + 14, 0xFF888888);
+                } else if (isPlaying) {
+                    context.drawTextWithShadow(this.textRenderer, Text.literal("Now Playing"), panelLeft + 35, y + 11, 0xFF88FF88);
+                }
 
                 if (canRemove) {
                     int removeX = panelLeft + PANEL_WIDTH - 25;
@@ -633,6 +680,9 @@ public class MineifyScreen extends Screen {
             int backY = contentTop + 28;
             context.fill(detailsLeft, backY, detailsLeft + 44, backY + 16, 0x33446699);
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Back"), detailsLeft + 22, backY + 4, 0xFFFFFFFF);
+            int queueSelectedX = detailsLeft + 48;
+            context.fill(queueSelectedX, backY, queueSelectedX + 72, backY + 16, 0x6633AA33);
+            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue Selected"), queueSelectedX + 36, backY + 4, 0xFFFFFFFF);
             context.drawTextWithShadow(this.textRenderer, Text.literal(truncateText(opened.name, 145)), detailsLeft + 52, backY + 4, 0xFFFFFFFF);
             context.drawTextWithShadow(this.textRenderer, Text.literal("by " + truncateText(opened.ownerName, 95)), detailsLeft + 52, backY + 14, 0xFFAAAAAA);
 
@@ -645,14 +695,20 @@ public class MineifyScreen extends Screen {
             for (int i = playlistDetailScrollOffset; i < detailEnd && py + detailRowHeight <= contentBottom; i++) {
                 ProfileTrackEntry track = opened.tracks.get(i);
                 context.fill(detailsLeft, py, detailsRight - 4, py + 18, 0x33222222);
+                int checkboxX = detailsLeft + 4;
+                boolean selectedTrack = selectedDetailTrackIndexes.contains(i);
+                context.fill(checkboxX, py + 4, checkboxX + 10, py + 14, selectedTrack ? 0x6677CC55 : 0x66333333);
+                if (selectedTrack) {
+                    context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("X"), checkboxX + 5, py + 5, 0xFFFFFFFF);
+                }
                 int queueX = detailsRight - 56;
                 int addX = detailsRight - 110;
                 context.fill(addX, py + 2, addX + 50, py + 16, 0x663366FF);
                 context.fill(queueX, py + 2, queueX + 50, py + 16, 0x6633AA33);
                 context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Playlist"), addX + 25, py + 6, 0xFFFFFFFF);
                 context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue"), queueX + 25, py + 6, 0xFFFFFFFF);
-                String trackTitle = truncateText(track.title, addX - detailsLeft - 10);
-                context.drawTextWithShadow(this.textRenderer, Text.literal(trackTitle), detailsLeft + 4, py + 5, 0xFFFFFFFF);
+                String trackTitle = truncateText(track.title, addX - (detailsLeft + 18) - 10);
+                context.drawTextWithShadow(this.textRenderer, Text.literal(trackTitle), detailsLeft + 18, py + 5, 0xFFFFFFFF);
                 py += 21;
             }
             drawScrollbar(context, detailsRight - 3, detailListTop, contentBottom, opened.tracks.size(), detailVisibleRows, playlistDetailScrollOffset);
@@ -754,7 +810,10 @@ public class MineifyScreen extends Screen {
             if (checked) {
                 context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("X"), left + 19, y + 4, 0xFFFFFFFF);
             }
-            String label = truncateText(track.title + " - " + track.artist + (track.duration.isBlank() ? "" : " (" + track.duration + ")"), SPOTIFY_PREVIEW_MODAL_WIDTH - 56);
+            String confidence = estimateSpotifyPreviewConfidence(track);
+            int confidenceColor = "High".equals(confidence) ? 0xFF66FF66 : ("Medium".equals(confidence) ? 0xFFFFCC66 : 0xFFFF8888);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(confidence), right - 54, y + 4, confidenceColor);
+            String label = truncateText(track.title + " - " + track.artist + (track.duration.isBlank() ? "" : " (" + track.duration + ")"), SPOTIFY_PREVIEW_MODAL_WIDTH - 104);
             context.drawTextWithShadow(this.textRenderer, Text.literal(label), left + 30, y + 4, 0xFFFFFFFF);
             y += rowHeight + 2;
         }
@@ -784,6 +843,173 @@ public class MineifyScreen extends Screen {
                 top + 28,
                 0xFFDDDDDD
         );
+    }
+
+    private void renderContextMenu(DrawContext context, int mouseX, int mouseY) {
+        if (!showContextMenu || contextMenuState == null) {
+            return;
+        }
+
+        int rowH = 16;
+        int width = 130;
+        int x = Math.min(contextMenuX, this.width - width - 4);
+        int y = Math.min(contextMenuY, this.height - 120);
+        int options = contextMenuState.type == ContextType.PLAYLIST ? 3 : 2;
+        int height = 4 + (options * rowH);
+        context.fill(x, y, x + width, y + height, 0xEE101010);
+        context.drawHorizontalLine(x, x + width - 1, y, 0xFFAAAAAA);
+        context.drawHorizontalLine(x, x + width - 1, y + height - 1, 0xFF666666);
+        context.drawVerticalLine(x, y, y + height - 1, 0xFFAAAAAA);
+        context.drawVerticalLine(x + width - 1, y, y + height - 1, 0xFF666666);
+
+        String[] labels = contextMenuState.type == ContextType.PLAYLIST
+                ? new String[]{"Queue All", "Shuffle Queue", "Add to Playlist >"}
+                : new String[]{"Add to Queue", "Add to Playlist >"};
+        int hoverIdx = -1;
+        for (int i = 0; i < labels.length; i++) {
+            int ry = y + 2 + (i * rowH);
+            boolean hovered = mouseX >= x + 2 && mouseX <= x + width - 2 && mouseY >= ry && mouseY <= ry + rowH - 1;
+            if (hovered) {
+                hoverIdx = i;
+                context.fill(x + 2, ry, x + width - 2, ry + rowH - 1, 0x6644AA44);
+            }
+            context.drawTextWithShadow(this.textRenderer, Text.literal(labels[i]), x + 6, ry + 4, 0xFFFFFFFF);
+        }
+        contextMenuState.hoveredIndex = hoverIdx;
+
+        boolean mouseInsideExistingSubmenu = mouseX >= contextMenuState.submenuX
+                && mouseX <= contextMenuState.submenuX + 170
+                && mouseY >= contextMenuState.submenuY
+                && mouseY <= contextMenuState.submenuY + (4 + (Math.max(1, contextMenuState.submenuRows) * rowH));
+        boolean showPlaylistSubmenu = hoverIdx == (labels.length - 1) || mouseInsideExistingSubmenu;
+        if (!showPlaylistSubmenu) {
+            return;
+        }
+
+        int subW = 170;
+        int subX = Math.min(x + width + 2, this.width - subW - 4);
+        int subRows = Math.max(1, Math.min(8, userPlaylists.size() + 1));
+        int subH = 4 + (subRows * rowH);
+        int subY = y + 2 + ((labels.length - 1) * rowH);
+        if (subY + subH > this.height - 4) {
+            subY = Math.max(4, this.height - subH - 4);
+        }
+        contextMenuState.submenuX = subX;
+        contextMenuState.submenuY = subY;
+        contextMenuState.submenuRows = subRows;
+        context.fill(subX, subY, subX + subW, subY + subH, 0xEE101010);
+        context.drawHorizontalLine(subX, subX + subW - 1, subY, 0xFFAAAAAA);
+        context.drawHorizontalLine(subX, subX + subW - 1, subY + subH - 1, 0xFF666666);
+        context.drawVerticalLine(subX, subY, subY + subH - 1, 0xFFAAAAAA);
+        context.drawVerticalLine(subX + subW - 1, subY, subY + subH - 1, 0xFF666666);
+
+        int subHover = -1;
+        for (int i = 0; i < subRows; i++) {
+            int ry = subY + 2 + (i * rowH);
+            boolean hovered = mouseX >= subX + 2 && mouseX <= subX + subW - 2 && mouseY >= ry && mouseY <= ry + rowH - 1;
+            if (hovered) {
+                subHover = i;
+                context.fill(subX + 2, ry, subX + subW - 2, ry + rowH - 1, 0x664466AA);
+            }
+            if (i == 0) {
+                context.drawTextWithShadow(this.textRenderer, Text.literal("+ | New Playlist"), subX + 6, ry + 4, 0xFFFFFFFF);
+            } else {
+                UserPlaylistSummary summary = userPlaylists.get(i - 1);
+                context.drawTextWithShadow(
+                        this.textRenderer,
+                        Text.literal(truncateText(summary.name, subW - 12)),
+                        subX + 6,
+                        ry + 4,
+                        0xFFFFFFFF
+                );
+            }
+        }
+        contextMenuState.submenuHoveredIndex = subHover;
+    }
+
+    private boolean handleContextMenuLeftClick(double mouseX, double mouseY) {
+        if (contextMenuState == null) {
+            return false;
+        }
+        int rowH = 16;
+        int baseW = 130;
+        int baseX = Math.min(contextMenuX, this.width - baseW - 4);
+        int baseY = Math.min(contextMenuY, this.height - 120);
+        int options = contextMenuState.type == ContextType.PLAYLIST ? 3 : 2;
+        int baseH = 4 + (options * rowH);
+        boolean inBase = mouseX >= baseX && mouseX <= baseX + baseW && mouseY >= baseY && mouseY <= baseY + baseH;
+        if (inBase) {
+            int idx = (int) ((mouseY - baseY - 2) / rowH);
+            if (idx < 0 || idx >= options) {
+                return true;
+            }
+            if (contextMenuState.type == ContextType.PLAYLIST) {
+                if (idx == 0) {
+                    queueAllFromProfilePlaylist(contextMenuState.playlistSummary, false);
+                    return true;
+                }
+                if (idx == 1) {
+                    queueAllFromProfilePlaylist(contextMenuState.playlistSummary, true);
+                    return true;
+                }
+                return handleContextSubmenuClick(mouseX, mouseY);
+            }
+            if (idx == 0) {
+                addToQueue(contextMenuState.songResult);
+                return true;
+            }
+            return handleContextSubmenuClick(mouseX, mouseY);
+        }
+        return handleContextSubmenuClick(mouseX, mouseY);
+    }
+
+    private boolean handleContextSubmenuClick(double mouseX, double mouseY) {
+        if (contextMenuState == null || contextMenuState.submenuRows <= 0) {
+            return false;
+        }
+        int rowH = 16;
+        int subW = 170;
+        int subH = 4 + (contextMenuState.submenuRows * rowH);
+        boolean inSub = mouseX >= contextMenuState.submenuX && mouseX <= contextMenuState.submenuX + subW
+                && mouseY >= contextMenuState.submenuY && mouseY <= contextMenuState.submenuY + subH;
+        if (!inSub) {
+            return false;
+        }
+        int idx = (int) ((mouseY - contextMenuState.submenuY - 2) / rowH);
+        if (idx < 0 || idx >= contextMenuState.submenuRows) {
+            return true;
+        }
+        if (idx == 0) {
+            openCreatePlaylistDialog();
+            if (contextMenuState.songResult != null) {
+                pendingPlaylistSearchResult = contextMenuState.songResult;
+            }
+            return true;
+        }
+        int playlistIdx = idx - 1;
+        if (playlistIdx < 0 || playlistIdx >= userPlaylists.size() || contextMenuState.songResult == null) {
+            return true;
+        }
+        UserPlaylistSummary summary = userPlaylists.get(playlistIdx);
+        SearchResult song = contextMenuState.songResult;
+        ClientPlayNetworking.send(new AddToUserPlaylistPacket(summary.id, song.videoId, song.title, song.duration));
+        playUiSound(SoundEvents.ENTITY_ITEM_PICKUP, 0.6f, 1.2f);
+        return true;
+    }
+
+    private void queueAllFromProfilePlaylist(ProfilePlaylistSummary summary, boolean shuffled) {
+        if (summary == null || summary.tracks == null || summary.tracks.isEmpty()) {
+            return;
+        }
+        List<ProfileTrackEntry> tracks = new ArrayList<>(summary.tracks);
+        if (shuffled) {
+            java.util.Collections.shuffle(tracks);
+        }
+        for (ProfileTrackEntry track : tracks) {
+            ClientPlayNetworking.send(new AddToPlaylistPacket(track.videoId, track.title, track.duration));
+        }
+        currentTab = 1;
+        playUiSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.8f, shuffled ? 1.35f : 1.15f);
     }
 
     private void drawSubtab(DrawContext context, int x, int y, int width, String label, boolean active) {
@@ -816,7 +1042,12 @@ public class MineifyScreen extends Screen {
             return;
         }
 
-        context.fill(x, y, x + size, y + size, 0x88444444);
+        int hash = (ownerId == null ? playerName : ownerId).hashCode();
+        int r = 70 + Math.abs(hash % 120);
+        int g = 70 + Math.abs((hash / 7) % 120);
+        int b = 70 + Math.abs((hash / 13) % 120);
+        int color = 0x88000000 | (r << 16) | (g << 8) | b;
+        context.fill(x, y, x + size, y + size, color);
         String initial = playerName == null || playerName.isEmpty() ? "?" : playerName.substring(0, 1).toUpperCase();
         context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(initial), x + (size / 2), y + 4, 0xFFFFFFFF);
     }
@@ -955,6 +1186,55 @@ public class MineifyScreen extends Screen {
         return normalized.startsWith("https://open.spotify.com/playlist/");
     }
 
+    private String estimateSpotifyPreviewConfidence(SpotifyPreviewTrack track) {
+        String query = (track.query == null ? "" : track.query).toLowerCase(Locale.ROOT);
+        String title = (track.title == null ? "" : track.title).toLowerCase(Locale.ROOT);
+        String artist = (track.artist == null ? "" : track.artist).toLowerCase(Locale.ROOT);
+        int score = 0;
+        if (!title.isBlank() && query.contains(title)) {
+            score += 2;
+        }
+        if (!artist.isBlank() && query.contains(artist.split(",")[0].trim())) {
+            score += 2;
+        }
+        if (query.contains("official")) {
+            score += 1;
+        }
+        if (score >= 4) {
+            return "High";
+        }
+        if (score >= 2) {
+            return "Medium";
+        }
+        return "Low";
+    }
+
+    private String estimatePromptOptionConfidence(SpotifyChoiceOption option) {
+        if (spotifyPromptState == null || option == null) {
+            return "Low";
+        }
+        String yt = (option.title == null ? "" : option.title).toLowerCase(Locale.ROOT);
+        String spTitle = spotifyPromptState.spotifyTitle == null ? "" : spotifyPromptState.spotifyTitle.toLowerCase(Locale.ROOT);
+        String spArtist = spotifyPromptState.spotifyArtist == null ? "" : spotifyPromptState.spotifyArtist.toLowerCase(Locale.ROOT);
+        int score = 0;
+        if (!spTitle.isBlank() && yt.contains(spTitle)) {
+            score += 2;
+        }
+        if (!spArtist.isBlank() && yt.contains(spArtist.split(",")[0].trim())) {
+            score += 2;
+        }
+        if (yt.contains("karaoke") || yt.contains("slowed") || yt.contains("nightcore")) {
+            score -= 1;
+        }
+        if (score >= 3) {
+            return "High";
+        }
+        if (score >= 1) {
+            return "Medium";
+        }
+        return "Low";
+    }
+
     private void chooseSpotifyOption(int optionIndex) {
         if (spotifyPromptState == null || optionIndex < 0 || optionIndex >= spotifyPromptState.options.size()) {
             return;
@@ -986,7 +1266,8 @@ public class MineifyScreen extends Screen {
             button.active = hasOption;
             if (hasOption) {
                 SpotifyChoiceOption option = spotifyPromptState.options.get(i);
-                button.setMessage(Text.literal((i + 1) + ". " + truncateText(option.title, SPOTIFY_MODAL_WIDTH - 46)));
+                String badge = estimatePromptOptionConfidence(option);
+                button.setMessage(Text.literal((i + 1) + ". [" + badge + "] " + truncateText(option.title, SPOTIFY_MODAL_WIDTH - 82)));
             }
         }
         if (spotifySkipButton != null) {
@@ -1173,6 +1454,19 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseClicked(Click click, boolean doubled) {
+        if (showContextMenu) {
+            if (click.button() == 0) {
+                if (handleContextMenuLeftClick(click.x(), click.y())) {
+                    return true;
+                }
+            }
+            showContextMenu = false;
+            contextMenuState = null;
+            if (click.button() != 1) {
+                return super.mouseClicked(click, doubled);
+            }
+        }
+
         if (showSpotifyPreviewDialog) {
             if (click.button() != 0 || spotifyImportPreviewState == null) {
                 return true;
@@ -1273,7 +1567,7 @@ public class MineifyScreen extends Screen {
             return true;
         }
 
-        if (click.button() == 0) {
+        if (click.button() == 0 || click.button() == 1) {
             double mouseX = click.x();
             double mouseY = click.y();
 
@@ -1283,24 +1577,41 @@ public class MineifyScreen extends Screen {
             int panelTop = centerY - PANEL_HEIGHT / 2;
             int listTop = currentTab == 0 ? panelTop + CONTENT_TOP_WITH_SEARCH : panelTop + CONTENT_TOP_NO_SEARCH;
             int listBottom = getListBottom(panelTop);
-            int itemHeight = LIST_ITEM_HEIGHT;
+            int itemHeight = currentTab == 0 ? getSearchRowHeight() : getQueueRowHeight();
 
             if (currentTab == 0 && !searchResults.isEmpty()) {
                 int y = listTop;
-                for (int i = searchScrollOffset; i < searchResults.size() && y + itemHeight <= listBottom; i++) {
+                int visibleRows = Math.max(1, (listBottom - listTop) / itemHeight);
+                int end = Math.min(searchResults.size(), searchScrollOffset + visibleRows);
+                for (int i = searchScrollOffset; i < end && y + itemHeight <= listBottom; i++) {
                     int rowRight = panelLeft + PANEL_WIDTH - 10;
                     int queueButtonX = rowRight - SEARCH_QUEUE_BUTTON_WIDTH;
                     int playlistButtonX = queueButtonX - SEARCH_BUTTON_GAP - SEARCH_PLAYLIST_BUTTON_WIDTH;
                     int buttonY = y + 4;
 
+                    if (click.button() == 1 && mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
+                            && mouseY >= y && mouseY <= y + itemHeight) {
+                        contextMenuState = ContextMenuState.forSong(searchResults.get(i));
+                        contextMenuX = (int) mouseX;
+                        contextMenuY = (int) mouseY;
+                        showContextMenu = true;
+                        return true;
+                    }
+
                     if (mouseX >= queueButtonX && mouseX <= queueButtonX + SEARCH_QUEUE_BUTTON_WIDTH
                             && mouseY >= buttonY && mouseY <= buttonY + 16) {
+                        if (click.button() != 0) {
+                            return true;
+                        }
                         addToQueue(searchResults.get(i));
                         return true;
                     }
 
                     if (mouseX >= playlistButtonX && mouseX <= playlistButtonX + SEARCH_PLAYLIST_BUTTON_WIDTH
                             && mouseY >= buttonY && mouseY <= buttonY + 16) {
+                        if (click.button() != 0) {
+                            return true;
+                        }
                         addToPlaylistLibrary(searchResults.get(i));
                         return true;
                     }
@@ -1314,11 +1625,22 @@ public class MineifyScreen extends Screen {
                 int queueEnd = Math.min(playlist.size(), playlistScrollOffset + visibleQueueRows);
                 for (int i = playlistScrollOffset; i < queueEnd && y + itemHeight <= listBottom; i++) {
                     PlaylistEntry entry = playlist.get(i);
+                    if (click.button() == 1 && mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
+                            && mouseY >= y && mouseY <= y + itemHeight) {
+                        contextMenuState = ContextMenuState.forQueueSong(entry);
+                        contextMenuX = (int) mouseX;
+                        contextMenuY = (int) mouseY;
+                        showContextMenu = true;
+                        return true;
+                    }
                     if (entry.addedBy.equals(currentPlayerName)) {
                         int removeX = panelLeft + PANEL_WIDTH - 25;
                         int removeY = y + 5;
                         if (mouseX >= removeX && mouseX <= removeX + 15
                                 && mouseY >= removeY && mouseY <= removeY + 15) {
+                            if (click.button() != 0) {
+                                return true;
+                            }
                             removeFromPlaylist(entry.videoId);
                             return true;
                         }
@@ -1326,6 +1648,9 @@ public class MineifyScreen extends Screen {
 
                     if (mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
                             && mouseY >= y && mouseY < y + itemHeight) {
+                        if (click.button() != 0) {
+                            return true;
+                        }
                         if (nowPlaying != null && i == 0) {
                             return true;
                         }
@@ -1356,6 +1681,7 @@ public class MineifyScreen extends Screen {
                     openedProfilePlaylistId = null;
                     selectedUserPlaylistId = null;
                     profilePlaylistScrollOffset = 0;
+                    selectedDetailTrackIndexes.clear();
                     return true;
                 }
                 if (mouseX >= likedTabX && mouseX <= likedTabX + likedTabWidth
@@ -1364,6 +1690,7 @@ public class MineifyScreen extends Screen {
                     openedProfilePlaylistId = null;
                     selectedUserPlaylistId = null;
                     profilePlaylistScrollOffset = 0;
+                    selectedDetailTrackIndexes.clear();
                     return true;
                 }
 
@@ -1379,6 +1706,7 @@ public class MineifyScreen extends Screen {
                         selectedUserPlaylistId = null;
                         profilePlaylistScrollOffset = 0;
                         playlistDetailScrollOffset = 0;
+                        selectedDetailTrackIndexes.clear();
                         return true;
                     }
                     rowY += rowHeight + 2;
@@ -1391,6 +1719,21 @@ public class MineifyScreen extends Screen {
                         if (mouseX >= detailsLeft && mouseX <= detailsLeft + 44 && mouseY >= backY && mouseY <= backY + 16) {
                             openedProfilePlaylistId = null;
                             playlistDetailScrollOffset = 0;
+                            selectedDetailTrackIndexes.clear();
+                            return true;
+                        }
+                        int queueSelectedX = detailsLeft + 48;
+                        if (mouseX >= queueSelectedX && mouseX <= queueSelectedX + 72 && mouseY >= backY && mouseY <= backY + 16) {
+                            ProfilePlaylistSummary opened = findProfilePlaylistById(openedProfilePlaylistId);
+                            if (opened != null) {
+                                for (Integer idx : selectedDetailTrackIndexes) {
+                                    if (idx != null && idx >= 0 && idx < opened.tracks.size()) {
+                                        ProfileTrackEntry t = opened.tracks.get(idx);
+                                        addToQueue(new SearchResult(t.videoId, t.title, opened.ownerName, t.duration, ""));
+                                    }
+                                }
+                                currentTab = 1;
+                            }
                             return true;
                         }
                         ProfilePlaylistSummary opened = findProfilePlaylistById(openedProfilePlaylistId);
@@ -1399,14 +1742,38 @@ public class MineifyScreen extends Screen {
                             int detailVisibleRows = Math.max(1, (contentBottom - py) / 21);
                             int detailEnd = Math.min(opened.tracks.size(), playlistDetailScrollOffset + detailVisibleRows);
                             for (int i = playlistDetailScrollOffset; i < detailEnd && py + 18 <= contentBottom; i++) {
+                                int checkboxX = detailsLeft + 4;
+                                if (mouseX >= checkboxX && mouseX <= checkboxX + 10 && mouseY >= py + 4 && mouseY <= py + 14) {
+                                    if (selectedDetailTrackIndexes.contains(i)) {
+                                        selectedDetailTrackIndexes.remove(i);
+                                    } else {
+                                        selectedDetailTrackIndexes.add(i);
+                                    }
+                                    return true;
+                                }
                                 int queueX = detailsRight - 56;
                                 int addX = detailsRight - 110;
+                                if (click.button() == 1 && mouseX >= detailsLeft && mouseX <= detailsRight - 6 && mouseY >= py && mouseY <= py + 18) {
+                                    contextMenuState = ContextMenuState.forProfileTrack(
+                                            new SearchResult(opened.tracks.get(i).videoId, opened.tracks.get(i).title, opened.ownerName, opened.tracks.get(i).duration, "")
+                                    );
+                                    contextMenuX = (int) mouseX;
+                                    contextMenuY = (int) mouseY;
+                                    showContextMenu = true;
+                                    return true;
+                                }
                                 if (mouseX >= queueX && mouseX <= queueX + 50 && mouseY >= py + 2 && mouseY <= py + 16) {
+                                    if (click.button() != 0) {
+                                        return true;
+                                    }
                                     ProfileTrackEntry track = opened.tracks.get(i);
                                     addToQueue(new SearchResult(track.videoId, track.title, opened.ownerName, track.duration, ""));
                                     return true;
                                 }
                                 if (mouseX >= addX && mouseX <= addX + 50 && mouseY >= py + 2 && mouseY <= py + 16) {
+                                    if (click.button() != 0) {
+                                        return true;
+                                    }
                                     ProfileTrackEntry track = opened.tracks.get(i);
                                     addToPlaylistLibrary(new SearchResult(track.videoId, track.title, opened.ownerName, track.duration, ""));
                                     return true;
@@ -1423,7 +1790,17 @@ public class MineifyScreen extends Screen {
                     int playlistEnd = Math.min(filtered.size(), profilePlaylistScrollOffset + playlistVisibleRows);
                     for (int i = profilePlaylistScrollOffset; i < playlistEnd && py + 18 <= contentBottom; i++) {
                         int likeX = detailsRight - 18;
+                        if (click.button() == 1 && mouseX >= detailsLeft && mouseX <= detailsRight - 6 && mouseY >= py && mouseY <= py + 18) {
+                            contextMenuState = ContextMenuState.forPlaylist(filtered.get(i));
+                            contextMenuX = (int) mouseX;
+                            contextMenuY = (int) mouseY;
+                            showContextMenu = true;
+                            return true;
+                        }
                         if (mouseX >= likeX && mouseX <= likeX + 14 && mouseY >= py + 2 && mouseY <= py + 16) {
+                            if (click.button() != 0) {
+                                return true;
+                            }
                             ProfilePlaylistSummary playlistSummary = filtered.get(i);
                             boolean newLikedState = !playlistSummary.likedByRequester;
                             ClientPlayNetworking.send(new ToggleLikedPlaylistPacket(playlistSummary.id, newLikedState));
@@ -1439,6 +1816,7 @@ public class MineifyScreen extends Screen {
                             selectedUserPlaylistId = filtered.get(i).id;
                             openedProfilePlaylistId = filtered.get(i).id;
                             playlistDetailScrollOffset = 0;
+                            selectedDetailTrackIndexes.clear();
                             return true;
                         }
                         py += 21;
@@ -1458,6 +1836,17 @@ public class MineifyScreen extends Screen {
                     target = Math.max(1, target);
                 }
                 queueDragTargetIndex = target;
+            }
+            int panelTop = (this.height / 2) - (PANEL_HEIGHT / 2);
+            int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
+            int listBottom = getListBottom(panelTop);
+            int rowHeight = getQueueRowHeight();
+            int visibleRows = Math.max(1, (listBottom - listTop) / rowHeight);
+            int maxOffset = Math.max(0, playlist.size() - visibleRows);
+            if (click.y() <= listTop + 10 && playlistScrollOffset > 0) {
+                playlistScrollOffset = Math.max(0, playlistScrollOffset - 1);
+            } else if (click.y() >= listBottom - 10 && playlistScrollOffset < maxOffset) {
+                playlistScrollOffset = Math.min(maxOffset, playlistScrollOffset + 1);
             }
             return true;
         }
@@ -1500,12 +1889,12 @@ public class MineifyScreen extends Screen {
         if (currentTab == 0) {
             int listTop = panelTop + CONTENT_TOP_WITH_SEARCH;
             int listBottom = getListBottom(panelTop);
-            int visibleItems = Math.max(1, (listBottom - listTop) / LIST_ITEM_HEIGHT);
+            int visibleItems = Math.max(1, (listBottom - listTop) / getSearchRowHeight());
             searchScrollOffset = Math.max(0, Math.min(searchScrollOffset - (int) verticalAmount, Math.max(0, searchResults.size() - visibleItems)));
         } else if (currentTab == 1) {
             int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
             int listBottom = getListBottom(panelTop);
-            int visibleItems = Math.max(1, (listBottom - listTop) / LIST_ITEM_HEIGHT);
+            int visibleItems = Math.max(1, (listBottom - listTop) / getQueueRowHeight());
             playlistScrollOffset = Math.max(0, Math.min(playlistScrollOffset - (int) verticalAmount, Math.max(0, playlist.size() - visibleItems)));
         } else if (currentTab == 2) {
             int panelLeft = (this.width / 2) - (PANEL_WIDTH / 2);
@@ -1762,7 +2151,7 @@ public class MineifyScreen extends Screen {
             return playlist.size() - 1;
         }
 
-        int relative = (int) ((mouseY - listTop) / LIST_ITEM_HEIGHT);
+        int relative = (int) ((mouseY - listTop) / getQueueRowHeight());
         int index = playlistScrollOffset + relative;
         if (index < minIndex) {
             return minIndex;
@@ -1862,6 +2251,44 @@ public class MineifyScreen extends Screen {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player != null) {
             client.player.playSound(sound, volume, pitch);
+        }
+    }
+
+    private enum ContextType {
+        SONG,
+        PLAYLIST
+    }
+
+    private static class ContextMenuState {
+        final ContextType type;
+        final SearchResult songResult;
+        final ProfilePlaylistSummary playlistSummary;
+        int hoveredIndex = -1;
+        int submenuX = 0;
+        int submenuY = 0;
+        int submenuRows = 0;
+        int submenuHoveredIndex = -1;
+
+        private ContextMenuState(ContextType type, SearchResult songResult, ProfilePlaylistSummary playlistSummary) {
+            this.type = type;
+            this.songResult = songResult;
+            this.playlistSummary = playlistSummary;
+        }
+
+        static ContextMenuState forSong(SearchResult song) {
+            return new ContextMenuState(ContextType.SONG, song, null);
+        }
+
+        static ContextMenuState forQueueSong(PlaylistEntry entry) {
+            return new ContextMenuState(ContextType.SONG, new SearchResult(entry.videoId, entry.title, entry.addedBy, entry.duration, ""), null);
+        }
+
+        static ContextMenuState forProfileTrack(SearchResult track) {
+            return new ContextMenuState(ContextType.SONG, track, null);
+        }
+
+        static ContextMenuState forPlaylist(ProfilePlaylistSummary summary) {
+            return new ContextMenuState(ContextType.PLAYLIST, null, summary);
         }
     }
 
