@@ -211,12 +211,12 @@ public class MineifyScreen extends Screen {
 
         int controlButtonY = bottomSectionTop + ((NOW_PLAYING_HEIGHT - 18) / 2);
 
-        this.pauseResumeButton = ButtonWidget.builder(Text.literal("||"), button -> {
+        this.pauseResumeButton = ButtonWidget.builder(Text.literal("⏸"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket(playbackPaused ? "resume" : "pause"));
         }).dimensions(controlsLeft + 8, controlButtonY, 42, 18).build();
         this.addDrawableChild(this.pauseResumeButton);
 
-        this.skipButton = ButtonWidget.builder(Text.literal(">>|"), button -> {
+        this.skipButton = ButtonWidget.builder(Text.literal("⏭"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket("skip"));
         }).dimensions(controlsLeft + 54, controlButtonY, 48, 18).build();
         this.addDrawableChild(this.skipButton);
@@ -680,11 +680,13 @@ public class MineifyScreen extends Screen {
             int backY = contentTop + 28;
             context.fill(detailsLeft, backY, detailsLeft + 44, backY + 16, 0x33446699);
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Back"), detailsLeft + 22, backY + 4, 0xFFFFFFFF);
-            int queueSelectedX = detailsLeft + 48;
+            int queueSelectedX = detailsRight - 76;
             context.fill(queueSelectedX, backY, queueSelectedX + 72, backY + 16, 0x6633AA33);
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue Selected"), queueSelectedX + 36, backY + 4, 0xFFFFFFFF);
-            context.drawTextWithShadow(this.textRenderer, Text.literal(truncateText(opened.name, 145)), detailsLeft + 52, backY + 4, 0xFFFFFFFF);
-            context.drawTextWithShadow(this.textRenderer, Text.literal("by " + truncateText(opened.ownerName, 95)), detailsLeft + 52, backY + 14, 0xFFAAAAAA);
+            int headerTextRight = queueSelectedX - 6;
+            int headerTextWidth = Math.max(30, headerTextRight - (detailsLeft + 52));
+            context.drawTextWithShadow(this.textRenderer, Text.literal(truncateText(opened.name, headerTextWidth)), detailsLeft + 52, backY + 4, 0xFFFFFFFF);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("by " + truncateText(opened.ownerName, headerTextWidth - 18)), detailsLeft + 52, backY + 14, 0xFFAAAAAA);
 
             int detailListTop = contentTop + 50;
             int detailRowHeight = 18;
@@ -1736,7 +1738,7 @@ public class MineifyScreen extends Screen {
                             selectedDetailTrackIndexes.clear();
                             return true;
                         }
-                        int queueSelectedX = detailsLeft + 48;
+                        int queueSelectedX = detailsRight - 76;
                         if (mouseX >= queueSelectedX && mouseX <= queueSelectedX + 72 && mouseY >= backY && mouseY <= backY + 16) {
                             ProfilePlaylistSummary opened = findProfilePlaylistById(openedProfilePlaylistId);
                             if (opened != null) {
@@ -1795,7 +1797,11 @@ public class MineifyScreen extends Screen {
                                 py += 21;
                             }
                         }
-                        return true;
+                        boolean inProfilesContent = mouseX >= panelLeft + 8 && mouseX <= panelLeft + PANEL_WIDTH - 10
+                                && mouseY >= contentTop && mouseY <= contentBottom;
+                        if (inProfilesContent) {
+                            return true;
+                        }
                     }
 
                     List<ProfilePlaylistSummary> filtered = getPlaylistsForRightPane(selected);
@@ -2191,7 +2197,7 @@ public class MineifyScreen extends Screen {
         boolean hasTrack = nowPlaying != null;
         if (pauseResumeButton != null) {
             pauseResumeButton.active = hasTrack;
-            pauseResumeButton.setMessage(Text.literal(playbackPaused ? ">" : "||"));
+            pauseResumeButton.setMessage(Text.literal(playbackPaused ? "▶" : "⏸"));
         }
         if (skipButton != null) {
             skipButton.active = hasTrack;

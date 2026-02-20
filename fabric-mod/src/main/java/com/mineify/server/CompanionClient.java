@@ -67,7 +67,15 @@ public class CompanionClient {
                 .thenApply(response -> {
                     List<SpotifyTrack> tracks = new ArrayList<>();
                     try {
+                        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                            Mineify.LOGGER.error("Spotify playlist request failed: status={}, body={}", response.statusCode(), response.body());
+                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks);
+                        }
                         JsonObject obj = gson.fromJson(response.body(), JsonObject.class);
+                        if (obj != null && obj.has("error") && !obj.get("error").isJsonNull()) {
+                            Mineify.LOGGER.error("Spotify playlist response error: {}", obj.get("error").getAsString());
+                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks);
+                        }
                         String playlistId = obj.has("playlistId") ? obj.get("playlistId").getAsString() : "";
                         String playlistName = obj.has("playlistName") ? obj.get("playlistName").getAsString() : "Imported Playlist";
                         String ownerName = obj.has("ownerDisplayName") ? obj.get("ownerDisplayName").getAsString() : "Spotify User";

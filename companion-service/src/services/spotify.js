@@ -38,10 +38,11 @@ async function getSpotifyAccessToken() {
     }
 
     const payload = await response.json();
-    if (!payload || !payload.accessToken) {
+    const token = payload?.access_token || payload?.accessToken || null;
+    if (!token) {
         throw new Error('Spotify access token missing in response');
     }
-    return payload.accessToken;
+    return token;
 }
 
 async function fetchPlaylistTracksPage(playlistId, accessToken, offset) {

@@ -7,6 +7,7 @@ import fs from 'fs';
 
 import searchRouter from './routes/search.js';
 import downloadRouter from './routes/download.js';
+import spotifyRouter from './routes/spotify.js';
 
 // Load environment variables
 dotenv.config();
@@ -51,6 +52,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/search', searchRouter);
 app.use('/api/download', downloadRouter);
 app.use('/api/info', downloadRouter); // Reuse download router for info endpoint
+app.use('/api/spotify', spotifyRouter);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
