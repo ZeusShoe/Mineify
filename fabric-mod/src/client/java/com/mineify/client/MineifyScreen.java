@@ -851,7 +851,7 @@ public class MineifyScreen extends Screen {
         }
 
         int rowH = 16;
-        int width = 130;
+        int width = 154;
         int x = Math.min(contextMenuX, this.width - width - 4);
         int y = Math.min(contextMenuY, this.height - 120);
         int options = contextMenuState.type == ContextType.PLAYLIST ? 3 : 2;
@@ -863,8 +863,11 @@ public class MineifyScreen extends Screen {
         context.drawVerticalLine(x + width - 1, y, y + height - 1, 0xFF666666);
 
         String[] labels = contextMenuState.type == ContextType.PLAYLIST
-                ? new String[]{"Queue All", "Shuffle Queue", "Add to Playlist >"}
-                : new String[]{"Add to Queue", "Add to Playlist >"};
+                ? new String[]{"Queue All", "Shuffle Queue", "Add to Playlist"}
+                : new String[]{"Add to Queue", "Add to Playlist"};
+        String[] hints = contextMenuState.type == ContextType.PLAYLIST
+                ? new String[]{"1", "2", "3"}
+                : new String[]{"1", "2"};
         int hoverIdx = -1;
         for (int i = 0; i < labels.length; i++) {
             int ry = y + 2 + (i * rowH);
@@ -874,6 +877,13 @@ public class MineifyScreen extends Screen {
                 context.fill(x + 2, ry, x + width - 2, ry + rowH - 1, 0x6644AA44);
             }
             context.drawTextWithShadow(this.textRenderer, Text.literal(labels[i]), x + 6, ry + 4, 0xFFFFFFFF);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(hints[i]), x + width - 14, ry + 4, 0xFFBBBBBB);
+            if (i == labels.length - 1) {
+                context.drawTextWithShadow(this.textRenderer, Text.literal(">"), x + width - 24, ry + 4, 0xFFCCCCCC);
+            }
+            if (i < labels.length - 1) {
+                context.fill(x + 5, ry + rowH - 1, x + width - 5, ry + rowH, 0x55222222);
+            }
         }
         contextMenuState.hoveredIndex = hoverIdx;
 
@@ -886,7 +896,7 @@ public class MineifyScreen extends Screen {
             return;
         }
 
-        int subW = 170;
+        int subW = 184;
         int subX = Math.min(x + width + 2, this.width - subW - 4);
         int subRows = Math.max(1, Math.min(8, userPlaylists.size() + 1));
         int subH = 4 + (subRows * rowH);
@@ -913,15 +923,19 @@ public class MineifyScreen extends Screen {
             }
             if (i == 0) {
                 context.drawTextWithShadow(this.textRenderer, Text.literal("+ | New Playlist"), subX + 6, ry + 4, 0xFFFFFFFF);
+                context.drawTextWithShadow(this.textRenderer, Text.literal("N"), subX + subW - 12, ry + 4, 0xFFBBBBBB);
             } else {
                 UserPlaylistSummary summary = userPlaylists.get(i - 1);
                 context.drawTextWithShadow(
                         this.textRenderer,
-                        Text.literal(truncateText(summary.name, subW - 12)),
+                        Text.literal(truncateText(summary.name, subW - 24)),
                         subX + 6,
                         ry + 4,
                         0xFFFFFFFF
                 );
+                if (i >= 1 && i <= 7) {
+                    context.drawTextWithShadow(this.textRenderer, Text.literal(String.valueOf(i + 2)), subX + subW - 12, ry + 4, 0xFFBBBBBB);
+                }
             }
         }
         contextMenuState.submenuHoveredIndex = subHover;
@@ -932,7 +946,7 @@ public class MineifyScreen extends Screen {
             return false;
         }
         int rowH = 16;
-        int baseW = 130;
+        int baseW = 154;
         int baseX = Math.min(contextMenuX, this.width - baseW - 4);
         int baseY = Math.min(contextMenuY, this.height - 120);
         int options = contextMenuState.type == ContextType.PLAYLIST ? 3 : 2;
@@ -968,7 +982,7 @@ public class MineifyScreen extends Screen {
             return false;
         }
         int rowH = 16;
-        int subW = 170;
+        int subW = 184;
         int subH = 4 + (contextMenuState.submenuRows * rowH);
         boolean inSub = mouseX >= contextMenuState.submenuX && mouseX <= contextMenuState.submenuX + subW
                 && mouseY >= contextMenuState.submenuY && mouseY <= contextMenuState.submenuY + subH;
@@ -1931,6 +1945,65 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean keyPressed(KeyInput input) {
+        if (showContextMenu && contextMenuState != null) {
+            int key = input.key();
+            if (key == GLFW.GLFW_KEY_ESCAPE) {
+                showContextMenu = false;
+                contextMenuState = null;
+                return true;
+            }
+            if (contextMenuState.type == ContextType.PLAYLIST) {
+                if (key == GLFW.GLFW_KEY_1) {
+                    queueAllFromProfilePlaylist(contextMenuState.playlistSummary, false);
+                    showContextMenu = false;
+                    contextMenuState = null;
+                    return true;
+                }
+                if (key == GLFW.GLFW_KEY_2) {
+                    queueAllFromProfilePlaylist(contextMenuState.playlistSummary, true);
+                    showContextMenu = false;
+                    contextMenuState = null;
+                    return true;
+                }
+                if (key == GLFW.GLFW_KEY_3) {
+                    return true;
+                }
+            } else {
+                if (key == GLFW.GLFW_KEY_1) {
+                    if (contextMenuState.songResult != null) {
+                        addToQueue(contextMenuState.songResult);
+                    }
+                    showContextMenu = false;
+                    contextMenuState = null;
+                    return true;
+                }
+                if (key == GLFW.GLFW_KEY_2) {
+                    return true;
+                }
+            }
+            if (key == GLFW.GLFW_KEY_N) {
+                openCreatePlaylistDialog();
+                if (contextMenuState.songResult != null) {
+                    pendingPlaylistSearchResult = contextMenuState.songResult;
+                }
+                showContextMenu = false;
+                contextMenuState = null;
+                return true;
+            }
+            if (key >= GLFW.GLFW_KEY_3 && key <= GLFW.GLFW_KEY_9 && contextMenuState.songResult != null) {
+                int index = key - GLFW.GLFW_KEY_3;
+                if (index >= 0 && index < userPlaylists.size()) {
+                    UserPlaylistSummary summary = userPlaylists.get(index);
+                    SearchResult song = contextMenuState.songResult;
+                    ClientPlayNetworking.send(new AddToUserPlaylistPacket(summary.id, song.videoId, song.title, song.duration));
+                    playUiSound(SoundEvents.ENTITY_ITEM_PICKUP, 0.6f, 1.2f);
+                    showContextMenu = false;
+                    contextMenuState = null;
+                    return true;
+                }
+            }
+        }
+
         if (showSpotifyPreviewDialog) {
             if (input.key() == GLFW.GLFW_KEY_ESCAPE) {
                 closeSpotifyPreviewDialog();
