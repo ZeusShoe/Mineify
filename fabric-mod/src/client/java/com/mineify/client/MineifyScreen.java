@@ -30,6 +30,9 @@ import net.minecraft.client.gui.widget.SliderWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.input.KeyInput;
 import net.minecraft.client.network.PlayerListEntry;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.sound.SoundEvent;
+import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
 
@@ -38,9 +41,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 
 @Environment(EnvType.CLIENT)
 public class MineifyScreen extends Screen {
+    private static final String HEART_OUTLINE = "♡";
+    private static final String HEART_FILLED = "♥";
     private static final int PANEL_WIDTH = 430;
     private static final int PANEL_HEIGHT = 245;
     private static final int NOW_PLAYING_HEIGHT = 38;
@@ -95,6 +101,7 @@ public class MineifyScreen extends Screen {
     private int searchScrollOffset = 0;
     private int playlistScrollOffset = 0;
     private int profileScrollOffset = 0;
+    private int profilePlaylistScrollOffset = 0;
     private int recentlyPlayedScrollOffset = 0;
     private int rightPaneTab = 0; // 0: Player's Playlists, 1: Player's Liked Playlists
 
@@ -184,14 +191,16 @@ public class MineifyScreen extends Screen {
                 .build();
         this.addDrawableChild(recentTabBtn);
 
-        this.pauseResumeButton = ButtonWidget.builder(Text.literal("Pause"), button -> {
+        int controlButtonY = bottomSectionTop + ((NOW_PLAYING_HEIGHT - 18) / 2);
+
+        this.pauseResumeButton = ButtonWidget.builder(Text.literal("||"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket(playbackPaused ? "resume" : "pause"));
-        }).dimensions(controlsLeft, bottomSectionTop + 2, 55, 18).build();
+        }).dimensions(controlsLeft + 8, controlButtonY, 42, 18).build();
         this.addDrawableChild(this.pauseResumeButton);
 
-        this.skipButton = ButtonWidget.builder(Text.literal("Skip"), button -> {
+        this.skipButton = ButtonWidget.builder(Text.literal(">>|"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket("skip"));
-        }).dimensions(controlsLeft + 60, bottomSectionTop + 2, 50, 18).build();
+        }).dimensions(controlsLeft + 54, controlButtonY, 48, 18).build();
         this.addDrawableChild(this.skipButton);
 
         this.volumeSlider = new SliderWidget(
@@ -397,8 +406,6 @@ public class MineifyScreen extends Screen {
             importSpotifyButton.active = showSpotifyControls && isValidSpotifyUrl(spotifyLinkField.getText());
         }
 
-        super.render(context, mouseX, mouseY, delta);
-
         if (currentTab == 0) {
             renderSearchTab(context, panelLeft, panelTop, mouseX, mouseY);
         } else if (currentTab == 1) {
@@ -413,6 +420,7 @@ public class MineifyScreen extends Screen {
         renderPlaylistModals(context, mouseX, mouseY);
         renderSpotifyPreviewModal(context, mouseX, mouseY);
         renderSpotifyPromptModal(context);
+        super.render(context, mouseX, mouseY, delta);
     }
 
     private int getListBottom(int panelTop) {
@@ -423,13 +431,16 @@ public class MineifyScreen extends Screen {
         int listTop = panelTop + CONTENT_TOP_WITH_SEARCH;
         int listBottom = getListBottom(panelTop);
         int itemHeight = LIST_ITEM_HEIGHT;
+        int visibleItems = Math.max(1, (listBottom - listTop) / itemHeight);
+        searchScrollOffset = Math.max(0, Math.min(searchScrollOffset, Math.max(0, searchResults.size() - visibleItems)));
 
         if (searchResults.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Search for songs above"),
                     panelLeft + PANEL_WIDTH / 2, listTop + 20, 0xFF888888);
         } else {
             int y = listTop;
-            for (int i = searchScrollOffset; i < searchResults.size() && y + itemHeight <= listBottom; i++) {
+            int end = Math.min(searchResults.size(), searchScrollOffset + visibleItems);
+            for (int i = searchScrollOffset; i < end && y + itemHeight <= listBottom; i++) {
                 SearchResult result = searchResults.get(i);
                 boolean hovered = mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
                         && mouseY >= y && mouseY < y + itemHeight;
@@ -484,6 +495,7 @@ public class MineifyScreen extends Screen {
 
                 y += itemHeight;
             }
+            drawScrollbar(context, panelLeft + PANEL_WIDTH - 5, listTop, listBottom, searchResults.size(), visibleItems, searchScrollOffset);
         }
     }
 
@@ -491,6 +503,9 @@ public class MineifyScreen extends Screen {
         int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
         int listBottom = getListBottom(panelTop);
         int itemHeight = LIST_ITEM_HEIGHT;
+        int rowStep = itemHeight;
+        int visibleItems = Math.max(1, (listBottom - listTop) / rowStep);
+        playlistScrollOffset = Math.max(0, Math.min(playlistScrollOffset, Math.max(0, playlist.size() - visibleItems)));
 
         if (playlist.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue is empty"),
@@ -499,17 +514,19 @@ public class MineifyScreen extends Screen {
                     panelLeft + PANEL_WIDTH / 2, listTop + 35, 0xFF666666);
         } else {
             int y = listTop;
-            for (int i = playlistScrollOffset; i < playlist.size() && y + itemHeight <= listBottom; i++) {
+            int end = Math.min(playlist.size(), playlistScrollOffset + visibleItems);
+            for (int i = playlistScrollOffset; i < end && y + itemHeight <= listBottom; i++) {
                 PlaylistEntry entry = playlist.get(i);
                 boolean hovered = mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
                         && mouseY >= y && mouseY < y + itemHeight;
                 boolean isPlaying = i == 0 && nowPlaying != null;
 
                 int bgColor = isPlaying ? 0x4400FF00 : (hovered ? 0x44FFFFFF : 0x22FFFFFF);
-                if (queueDragActive && i == queueDragTargetIndex) {
-                    bgColor = 0x66FFFF55;
-                }
                 context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + itemHeight - 2, bgColor);
+                if (queueDragActive && i == queueDragTargetIndex) {
+                    int markerY = y + 1;
+                    context.fill(panelLeft + 12, markerY, panelLeft + PANEL_WIDTH - 12, markerY + 2, 0xAAFFFF55);
+                }
 
                 String pos = (i + 1) + ".";
                 context.drawTextWithShadow(this.textRenderer, Text.literal(pos), panelLeft + 15, y + 8, 0xFFAAAAAA);
@@ -535,6 +552,7 @@ public class MineifyScreen extends Screen {
 
                 y += itemHeight;
             }
+            drawScrollbar(context, panelLeft + PANEL_WIDTH - 5, listTop, listBottom, playlist.size(), visibleItems, playlistScrollOffset);
         }
     }
 
@@ -542,26 +560,37 @@ public class MineifyScreen extends Screen {
         int contentTop = panelTop + CONTENT_TOP_WITH_SEARCH;
         int contentBottom = getListBottom(panelTop);
         int leftPaneRight = panelLeft + PLAYLISTS_LEFT_WIDTH;
+        int detailsLeft = leftPaneRight + 8;
+        int detailsRight = panelLeft + PANEL_WIDTH - 10;
 
         context.fill(panelLeft + 6, contentTop, leftPaneRight, contentBottom, 0x33000000);
-        context.fill(leftPaneRight + 2, contentTop, panelLeft + PANEL_WIDTH - 10, contentBottom, 0x22000000);
+        context.fill(leftPaneRight + 2, contentTop, detailsRight, contentBottom, 0x22000000);
 
         int tabY = contentTop + 4;
-        drawSubtab(context, panelLeft + PLAYLISTS_LEFT_WIDTH + 8, tabY, 92, "Player's Playlists", rightPaneTab == 0);
-        drawSubtab(context, panelLeft + PLAYLISTS_LEFT_WIDTH + 104, tabY, 104, "Player's Liked", rightPaneTab == 1);
+        int playlistsTabX = panelLeft + PLAYLISTS_LEFT_WIDTH + 8;
+        int playlistsTabWidth = 78;
+        int likedTabX = playlistsTabX + playlistsTabWidth + 4;
+        int likedTabWidth = 110;
+        drawSubtab(context, playlistsTabX, tabY, playlistsTabWidth, "Playlists", rightPaneTab == 0);
+        drawSubtab(context, likedTabX, tabY, likedTabWidth, "Liked Playlists", rightPaneTab == 1);
 
         List<ProfileSummary> visibleProfiles = getFilteredProfiles();
         int rowY = contentTop + 8;
         int rowHeight = 22;
         int drawn = 0;
-        for (int i = profileScrollOffset; i < visibleProfiles.size() && rowY + rowHeight <= contentBottom; i++) {
+        int profileAreaTop = rowY;
+        int profileAreaBottom = contentBottom;
+        int profileVisibleRows = Math.max(1, (profileAreaBottom - profileAreaTop) / (rowHeight + 2));
+        profileScrollOffset = Math.max(0, Math.min(profileScrollOffset, Math.max(0, visibleProfiles.size() - profileVisibleRows)));
+        int profileEnd = Math.min(visibleProfiles.size(), profileScrollOffset + profileVisibleRows);
+        for (int i = profileScrollOffset; i < profileEnd && rowY + rowHeight <= contentBottom; i++) {
             ProfileSummary profile = visibleProfiles.get(i);
             boolean selected = profile.ownerId.equals(selectedProfileId);
             boolean hovered = mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= rowY && mouseY <= rowY + rowHeight;
             int color = selected ? 0x6644AA44 : (hovered ? 0x44444444 : 0x22222222);
             context.fill(panelLeft + 8, rowY, leftPaneRight - 2, rowY + rowHeight, color);
 
-            renderPlayerHead(context, profile.ownerName, panelLeft + 12, rowY + 3, 16);
+            renderPlayerHead(context, profile.ownerId, profile.ownerName, panelLeft + 12, rowY + 3, 16);
             String name = truncateText(profile.ownerName, PLAYLISTS_LEFT_WIDTH - 44);
             context.drawTextWithShadow(this.textRenderer, Text.literal(name), panelLeft + 32, rowY + 8, 0xFFFFFFFF);
 
@@ -572,23 +601,28 @@ public class MineifyScreen extends Screen {
         if (drawn == 0) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("No players"), panelLeft + (PLAYLISTS_LEFT_WIDTH / 2), contentTop + 24, 0xFF888888);
         }
+        drawScrollbar(context, leftPaneRight - 5, profileAreaTop, profileAreaBottom, visibleProfiles.size(), profileVisibleRows, profileScrollOffset);
 
         ProfileSummary selected = getSelectedProfile();
-        int detailsLeft = leftPaneRight + 8;
         if (selected == null) {
-            context.drawTextWithShadow(this.textRenderer, Text.literal("Select a player profile"), detailsLeft, contentTop + 24, 0xFF999999);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("Select a player profile"), detailsLeft, contentTop + 28, 0xFF999999);
             return;
         }
 
-        String header = selected.ownerName + (selected.isSelf ? " (You)" : "");
-        context.drawTextWithShadow(this.textRenderer, Text.literal(header), detailsLeft, contentTop + 26, 0xFFFFFFFF);
-        context.drawTextWithShadow(
-                this.textRenderer,
-                Text.literal(rightPaneTab == 0 ? "Player's playlists" : "Player's liked playlists"),
-                detailsLeft,
-                contentTop + 38,
-                0xFF77FF77
-        );
+        if (!selected.isSelf) {
+            int headerTop = panelTop + 30;
+            int headerBottom = headerTop + 19;
+            context.fill(detailsLeft, headerTop, detailsRight, headerBottom, 0x33222222);
+            renderPlayerHead(context, selected.ownerId, selected.ownerName, detailsLeft + 4, headerTop + 1, 16);
+            String headerName = truncateText(selected.ownerName, detailsRight - detailsLeft - 28);
+            context.drawTextWithShadow(
+                    this.textRenderer,
+                    Text.literal(headerName).styled(style -> style.withBold(true)),
+                    detailsLeft + 24,
+                    headerTop + 6,
+                    0xFFFFFFFF
+            );
+        }
 
         if (openedProfilePlaylistId != null) {
             ProfilePlaylistSummary opened = findProfilePlaylistById(openedProfilePlaylistId);
@@ -596,17 +630,23 @@ public class MineifyScreen extends Screen {
                 openedProfilePlaylistId = null;
                 return;
             }
-            context.fill(detailsLeft, contentTop + 52, detailsLeft + 44, contentTop + 68, 0x33446699);
-            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Back"), detailsLeft + 22, contentTop + 56, 0xFFFFFFFF);
-            context.drawTextWithShadow(this.textRenderer, Text.literal(truncateText(opened.name, 145)), detailsLeft + 52, contentTop + 56, 0xFFFFFFFF);
-            context.drawTextWithShadow(this.textRenderer, Text.literal("by " + truncateText(opened.ownerName, 95)), detailsLeft + 52, contentTop + 66, 0xFFAAAAAA);
+            int backY = contentTop + 28;
+            context.fill(detailsLeft, backY, detailsLeft + 44, backY + 16, 0x33446699);
+            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Back"), detailsLeft + 22, backY + 4, 0xFFFFFFFF);
+            context.drawTextWithShadow(this.textRenderer, Text.literal(truncateText(opened.name, 145)), detailsLeft + 52, backY + 4, 0xFFFFFFFF);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("by " + truncateText(opened.ownerName, 95)), detailsLeft + 52, backY + 14, 0xFFAAAAAA);
 
-            int py = contentTop + 78;
-            for (int i = playlistDetailScrollOffset; i < opened.tracks.size() && py + 18 <= contentBottom; i++) {
+            int detailListTop = contentTop + 50;
+            int detailRowHeight = 18;
+            int detailVisibleRows = Math.max(1, (contentBottom - detailListTop) / 21);
+            playlistDetailScrollOffset = Math.max(0, Math.min(playlistDetailScrollOffset, Math.max(0, opened.tracks.size() - detailVisibleRows)));
+            int detailEnd = Math.min(opened.tracks.size(), playlistDetailScrollOffset + detailVisibleRows);
+            int py = detailListTop;
+            for (int i = playlistDetailScrollOffset; i < detailEnd && py + detailRowHeight <= contentBottom; i++) {
                 ProfileTrackEntry track = opened.tracks.get(i);
-                context.fill(detailsLeft, py, panelLeft + PANEL_WIDTH - 14, py + 18, 0x33222222);
-                int queueX = panelLeft + PANEL_WIDTH - 70;
-                int addX = panelLeft + PANEL_WIDTH - 124;
+                context.fill(detailsLeft, py, detailsRight - 4, py + 18, 0x33222222);
+                int queueX = detailsRight - 56;
+                int addX = detailsRight - 110;
                 context.fill(addX, py + 2, addX + 50, py + 16, 0x663366FF);
                 context.fill(queueX, py + 2, queueX + 50, py + 16, 0x6633AA33);
                 context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Playlist"), addX + 25, py + 6, 0xFFFFFFFF);
@@ -615,34 +655,45 @@ public class MineifyScreen extends Screen {
                 context.drawTextWithShadow(this.textRenderer, Text.literal(trackTitle), detailsLeft + 4, py + 5, 0xFFFFFFFF);
                 py += 21;
             }
+            drawScrollbar(context, detailsRight - 3, detailListTop, contentBottom, opened.tracks.size(), detailVisibleRows, playlistDetailScrollOffset);
             if (opened.tracks.isEmpty()) {
-                context.drawTextWithShadow(this.textRenderer, Text.literal("This playlist has no tracks"), detailsLeft, contentTop + 82, 0xFF999999);
+                context.drawTextWithShadow(this.textRenderer, Text.literal("This playlist has no tracks"), detailsLeft, detailListTop + 4, 0xFF999999);
             }
             return;
         }
 
         List<ProfilePlaylistSummary> filteredPlaylists = getPlaylistsForRightPane(selected);
-        int py = contentTop + 52;
-        for (int i = 0; i < filteredPlaylists.size() && py + 18 <= contentBottom; i++) {
+        int listTop = contentTop + 28;
+        int visibleRows = Math.max(1, (contentBottom - listTop) / 21);
+        profilePlaylistScrollOffset = Math.max(0, Math.min(profilePlaylistScrollOffset, Math.max(0, filteredPlaylists.size() - visibleRows)));
+        int end = Math.min(filteredPlaylists.size(), profilePlaylistScrollOffset + visibleRows);
+        int py = listTop;
+        for (int i = profilePlaylistScrollOffset; i < end && py + 18 <= contentBottom; i++) {
             ProfilePlaylistSummary summary = filteredPlaylists.get(i);
             boolean playlistSelected = summary.id.equals(selectedUserPlaylistId);
-            context.fill(detailsLeft, py, panelLeft + PANEL_WIDTH - 14, py + 18, playlistSelected ? 0x66448844 : 0x33222222);
-            int likeX = panelLeft + PANEL_WIDTH - 32;
-            context.fill(likeX, py + 2, likeX + 14, py + 16, summary.likedByRequester ? 0x6688CC44 : 0x66333333);
-            context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(summary.likedByRequester ? "-" : "+"), likeX + 7, py + 6, 0xFFFFFFFF);
-            String privacy = summary.isPublic ? "Public" : "Private";
+            context.fill(detailsLeft, py, detailsRight - 4, py + 18, playlistSelected ? 0x66448844 : 0x33222222);
+            int likeX = detailsRight - 18;
+            context.fill(likeX, py + 2, likeX + 14, py + 16, summary.likedByRequester ? 0x66440000 : 0x66333333);
+            context.drawCenteredTextWithShadow(
+                    this.textRenderer,
+                    Text.literal(summary.likedByRequester ? HEART_FILLED : HEART_OUTLINE),
+                    likeX + 7,
+                    py + 6,
+                    summary.likedByRequester ? 0xFFFF5555 : 0xFFAAAAAA
+            );
             context.drawTextWithShadow(
                     this.textRenderer,
-                    Text.literal(truncateText(summary.name, 130) + " - " + summary.trackCount + " - " + privacy),
+                    Text.literal(truncateText(summary.name, 136) + " - " + summary.trackCount + " songs"),
                     detailsLeft + 4,
                     py + 5,
                     0xFFFFFFFF
             );
             py += 21;
         }
+        drawScrollbar(context, detailsRight - 3, listTop, contentBottom, filteredPlaylists.size(), visibleRows, profilePlaylistScrollOffset);
 
         if (filteredPlaylists.isEmpty()) {
-            context.drawTextWithShadow(this.textRenderer, Text.literal("No playlists in this section"), detailsLeft, contentTop + 58, 0xFF888888);
+            context.drawTextWithShadow(this.textRenderer, Text.literal("No playlists in this section"), detailsLeft, listTop + 6, 0xFF888888);
         }
     }
 
@@ -658,7 +709,9 @@ public class MineifyScreen extends Screen {
         }
 
         int maxRows = Math.max(1, Math.min((listBottom - listTop) / (rowHeight + 2), RECENT_UI_MAX_VISIBLE));
-        for (int i = recentlyPlayedScrollOffset; i < recentlyPlayed.size() && y + rowHeight <= listBottom && i < recentlyPlayedScrollOffset + maxRows; i++) {
+        recentlyPlayedScrollOffset = Math.max(0, Math.min(recentlyPlayedScrollOffset, Math.max(0, recentlyPlayed.size() - maxRows)));
+        int end = Math.min(recentlyPlayed.size(), recentlyPlayedScrollOffset + maxRows);
+        for (int i = recentlyPlayedScrollOffset; i < end && y + rowHeight <= listBottom; i++) {
             RecentlyPlayedEntry entry = recentlyPlayed.get(i);
             context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + rowHeight - 2, 0x22222222);
             String text = truncateText(entry.title + " (" + entry.duration + ")", PANEL_WIDTH - 100);
@@ -666,6 +719,7 @@ public class MineifyScreen extends Screen {
             context.drawTextWithShadow(this.textRenderer, Text.literal(formatTimeAgo(entry.playedAtEpochMs)), panelLeft + PANEL_WIDTH - 88, y + 5, 0xFFAAAAAA);
             y += rowHeight + 2;
         }
+        drawScrollbar(context, panelLeft + PANEL_WIDTH - 5, listTop, listBottom, recentlyPlayed.size(), maxRows, recentlyPlayedScrollOffset);
     }
 
     private void renderSpotifyPreviewModal(DrawContext context, int mouseX, int mouseY) {
@@ -737,8 +791,26 @@ public class MineifyScreen extends Screen {
         context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(truncateText(label, width - 6)), x + (width / 2), y + 4, 0xFFFFFFFF);
     }
 
-    private void renderPlayerHead(DrawContext context, String playerName, int x, int y, int size) {
-        PlayerListEntry entry = findPlayerListEntry(playerName);
+    private void drawScrollbar(DrawContext context, int x, int top, int bottom, int totalItems, int visibleItems, int scrollOffset) {
+        if (bottom <= top) {
+            return;
+        }
+        context.fill(x, top, x + 3, bottom, 0x44222222);
+        if (totalItems <= visibleItems || totalItems <= 0) {
+            context.fill(x, top, x + 3, bottom, 0x66555555);
+            return;
+        }
+
+        int trackHeight = bottom - top;
+        int thumbHeight = Math.max(14, (int) ((visibleItems / (double) totalItems) * trackHeight));
+        int maxOffset = Math.max(1, totalItems - visibleItems);
+        int maxTravel = Math.max(1, trackHeight - thumbHeight);
+        int thumbTop = top + (int) ((scrollOffset / (double) maxOffset) * maxTravel);
+        context.fill(x, thumbTop, x + 3, thumbTop + thumbHeight, 0x99BBBBBB);
+    }
+
+    private void renderPlayerHead(DrawContext context, String ownerId, String playerName, int x, int y, int size) {
+        PlayerListEntry entry = findPlayerListEntry(ownerId, playerName);
         if (entry != null) {
             PlayerSkinDrawer.draw(context, entry.getSkinTextures(), x, y, size);
             return;
@@ -749,14 +821,26 @@ public class MineifyScreen extends Screen {
         context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(initial), x + (size / 2), y + 4, 0xFFFFFFFF);
     }
 
-    private PlayerListEntry findPlayerListEntry(String playerName) {
+    private UUID parseOwnerUuid(String ownerId, String ownerName) {
+        if (ownerId != null && !ownerId.isBlank()) {
+            try {
+                return UUID.fromString(ownerId);
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+        String source = ownerName == null ? "mineify-unknown" : ("mineify-" + ownerName.toLowerCase(Locale.ROOT));
+        return UUID.nameUUIDFromBytes(source.getBytes());
+    }
+
+    private PlayerListEntry findPlayerListEntry(String ownerId, String playerName) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client.player == null || client.player.networkHandler == null) {
             return null;
         }
 
+        UUID targetUuid = parseOwnerUuid(ownerId, playerName);
         for (PlayerListEntry entry : client.player.networkHandler.getPlayerList()) {
-            if (entry.getProfile().name().equalsIgnoreCase(playerName)) {
+            if (entry.getProfile().id().equals(targetUuid) || entry.getProfile().name().equalsIgnoreCase(playerName)) {
                 return entry;
             }
         }
@@ -1226,7 +1310,9 @@ public class MineifyScreen extends Screen {
 
             if (currentTab == 1 && !playlist.isEmpty()) {
                 int y = listTop;
-                for (int i = playlistScrollOffset; i < playlist.size() && y + itemHeight <= listBottom; i++) {
+                int visibleQueueRows = Math.max(1, (listBottom - listTop) / itemHeight);
+                int queueEnd = Math.min(playlist.size(), playlistScrollOffset + visibleQueueRows);
+                for (int i = playlistScrollOffset; i < queueEnd && y + itemHeight <= listBottom; i++) {
                     PlaylistEntry entry = playlist.get(i);
                     if (entry.addedBy.equals(currentPlayerName)) {
                         int removeX = panelLeft + PANEL_WIDTH - 25;
@@ -1240,6 +1326,9 @@ public class MineifyScreen extends Screen {
 
                     if (mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
                             && mouseY >= y && mouseY < y + itemHeight) {
+                        if (nowPlaying != null && i == 0) {
+                            return true;
+                        }
                         queueDragActive = true;
                         queueDragFromIndex = i;
                         queueDragTargetIndex = i;
@@ -1253,31 +1342,43 @@ public class MineifyScreen extends Screen {
                 int contentTop = panelTop + CONTENT_TOP_WITH_SEARCH;
                 int contentBottom = getListBottom(panelTop);
                 int leftPaneRight = panelLeft + PLAYLISTS_LEFT_WIDTH;
+                int detailsLeft = leftPaneRight + 8;
+                int detailsRight = panelLeft + PANEL_WIDTH - 10;
 
                 int subtabY = contentTop + 4;
-                if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 8 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 100
+                int playlistsTabX = panelLeft + PLAYLISTS_LEFT_WIDTH + 8;
+                int playlistsTabWidth = 78;
+                int likedTabX = playlistsTabX + playlistsTabWidth + 4;
+                int likedTabWidth = 110;
+                if (mouseX >= playlistsTabX && mouseX <= playlistsTabX + playlistsTabWidth
                         && mouseY >= subtabY && mouseY <= subtabY + 16) {
                     rightPaneTab = 0;
                     openedProfilePlaylistId = null;
                     selectedUserPlaylistId = null;
+                    profilePlaylistScrollOffset = 0;
                     return true;
                 }
-                if (mouseX >= panelLeft + PLAYLISTS_LEFT_WIDTH + 104 && mouseX <= panelLeft + PLAYLISTS_LEFT_WIDTH + 208
+                if (mouseX >= likedTabX && mouseX <= likedTabX + likedTabWidth
                         && mouseY >= subtabY && mouseY <= subtabY + 16) {
                     rightPaneTab = 1;
                     openedProfilePlaylistId = null;
                     selectedUserPlaylistId = null;
+                    profilePlaylistScrollOffset = 0;
                     return true;
                 }
 
                 List<ProfileSummary> visibleProfiles = getFilteredProfiles();
                 int rowY = contentTop + 8;
                 int rowHeight = 22;
-                for (int i = profileScrollOffset; i < visibleProfiles.size() && rowY + rowHeight <= contentBottom; i++) {
+                int visibleProfileRows = Math.max(1, (contentBottom - rowY) / (rowHeight + 2));
+                int profileEnd = Math.min(visibleProfiles.size(), profileScrollOffset + visibleProfileRows);
+                for (int i = profileScrollOffset; i < profileEnd && rowY + rowHeight <= contentBottom; i++) {
                     if (mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= rowY && mouseY <= rowY + rowHeight) {
                         selectedProfileId = visibleProfiles.get(i).ownerId;
                         openedProfilePlaylistId = null;
                         selectedUserPlaylistId = null;
+                        profilePlaylistScrollOffset = 0;
+                        playlistDetailScrollOffset = 0;
                         return true;
                     }
                     rowY += rowHeight + 2;
@@ -1285,19 +1386,21 @@ public class MineifyScreen extends Screen {
 
                 ProfileSummary selected = getSelectedProfile();
                 if (selected != null) {
-                    int detailsLeft = leftPaneRight + 8;
                     if (openedProfilePlaylistId != null) {
-                        if (mouseX >= detailsLeft && mouseX <= detailsLeft + 44 && mouseY >= contentTop + 52 && mouseY <= contentTop + 68) {
+                        int backY = contentTop + 28;
+                        if (mouseX >= detailsLeft && mouseX <= detailsLeft + 44 && mouseY >= backY && mouseY <= backY + 16) {
                             openedProfilePlaylistId = null;
                             playlistDetailScrollOffset = 0;
                             return true;
                         }
                         ProfilePlaylistSummary opened = findProfilePlaylistById(openedProfilePlaylistId);
                         if (opened != null) {
-                            int py = contentTop + 78;
-                            for (int i = playlistDetailScrollOffset; i < opened.tracks.size() && py + 18 <= contentBottom; i++) {
-                                int queueX = panelLeft + PANEL_WIDTH - 70;
-                                int addX = panelLeft + PANEL_WIDTH - 124;
+                            int py = contentTop + 50;
+                            int detailVisibleRows = Math.max(1, (contentBottom - py) / 21);
+                            int detailEnd = Math.min(opened.tracks.size(), playlistDetailScrollOffset + detailVisibleRows);
+                            for (int i = playlistDetailScrollOffset; i < detailEnd && py + 18 <= contentBottom; i++) {
+                                int queueX = detailsRight - 56;
+                                int addX = detailsRight - 110;
                                 if (mouseX >= queueX && mouseX <= queueX + 50 && mouseY >= py + 2 && mouseY <= py + 16) {
                                     ProfileTrackEntry track = opened.tracks.get(i);
                                     addToQueue(new SearchResult(track.videoId, track.title, opened.ownerName, track.duration, ""));
@@ -1305,8 +1408,7 @@ public class MineifyScreen extends Screen {
                                 }
                                 if (mouseX >= addX && mouseX <= addX + 50 && mouseY >= py + 2 && mouseY <= py + 16) {
                                     ProfileTrackEntry track = opened.tracks.get(i);
-                                    pendingPlaylistSearchResult = new SearchResult(track.videoId, track.title, opened.ownerName, track.duration, "");
-                                    showPlaylistPicker = true;
+                                    addToPlaylistLibrary(new SearchResult(track.videoId, track.title, opened.ownerName, track.duration, ""));
                                     return true;
                                 }
                                 py += 21;
@@ -1316,16 +1418,24 @@ public class MineifyScreen extends Screen {
                     }
 
                     List<ProfilePlaylistSummary> filtered = getPlaylistsForRightPane(selected);
-                    int py = contentTop + 52;
-                    for (int i = 0; i < filtered.size() && py + 18 <= contentBottom; i++) {
-                        int likeX = panelLeft + PANEL_WIDTH - 32;
+                    int py = contentTop + 28;
+                    int playlistVisibleRows = Math.max(1, (contentBottom - py) / 21);
+                    int playlistEnd = Math.min(filtered.size(), profilePlaylistScrollOffset + playlistVisibleRows);
+                    for (int i = profilePlaylistScrollOffset; i < playlistEnd && py + 18 <= contentBottom; i++) {
+                        int likeX = detailsRight - 18;
                         if (mouseX >= likeX && mouseX <= likeX + 14 && mouseY >= py + 2 && mouseY <= py + 16) {
                             ProfilePlaylistSummary playlistSummary = filtered.get(i);
-                            ClientPlayNetworking.send(new ToggleLikedPlaylistPacket(playlistSummary.id, !playlistSummary.likedByRequester));
+                            boolean newLikedState = !playlistSummary.likedByRequester;
+                            ClientPlayNetworking.send(new ToggleLikedPlaylistPacket(playlistSummary.id, newLikedState));
+                            playUiSound(
+                                    newLikedState ? SoundEvents.BLOCK_NOTE_BLOCK_BELL : SoundEvents.BLOCK_NOTE_BLOCK_PLING,
+                                    0.7f,
+                                    newLikedState ? 1.25f : 0.9f
+                            );
                             requestProfilesSync(profileSearchField == null ? "" : profileSearchField.getText());
                             return true;
                         }
-                        if (mouseX >= detailsLeft && mouseX <= panelLeft + PANEL_WIDTH - 38 && mouseY >= py && mouseY <= py + 18) {
+                        if (mouseX >= detailsLeft && mouseX <= detailsRight - 22 && mouseY >= py && mouseY <= py + 18) {
                             selectedUserPlaylistId = filtered.get(i).id;
                             openedProfilePlaylistId = filtered.get(i).id;
                             playlistDetailScrollOffset = 0;
@@ -1344,6 +1454,9 @@ public class MineifyScreen extends Screen {
         if (click.button() == 0 && queueDragActive && currentTab == 1) {
             int target = getQueueIndexFromMouse(click.y());
             if (target >= 0) {
+                if (nowPlaying != null) {
+                    target = Math.max(1, target);
+                }
                 queueDragTargetIndex = target;
             }
             return true;
@@ -1358,6 +1471,9 @@ public class MineifyScreen extends Screen {
             int to = getQueueIndexFromMouse(click.y());
             if (to < 0) {
                 to = queueDragTargetIndex;
+            }
+            if (nowPlaying != null) {
+                to = Math.max(1, to);
             }
 
             queueDragActive = false;
@@ -1380,21 +1496,45 @@ public class MineifyScreen extends Screen {
         if (queueDragActive) {
             return true;
         }
-        int visibleItems = 5;
+        int panelTop = (this.height / 2) - (PANEL_HEIGHT / 2);
         if (currentTab == 0) {
+            int listTop = panelTop + CONTENT_TOP_WITH_SEARCH;
+            int listBottom = getListBottom(panelTop);
+            int visibleItems = Math.max(1, (listBottom - listTop) / LIST_ITEM_HEIGHT);
             searchScrollOffset = Math.max(0, Math.min(searchScrollOffset - (int) verticalAmount, Math.max(0, searchResults.size() - visibleItems)));
         } else if (currentTab == 1) {
+            int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
+            int listBottom = getListBottom(panelTop);
+            int visibleItems = Math.max(1, (listBottom - listTop) / LIST_ITEM_HEIGHT);
             playlistScrollOffset = Math.max(0, Math.min(playlistScrollOffset - (int) verticalAmount, Math.max(0, playlist.size() - visibleItems)));
         } else if (currentTab == 2) {
+            int panelLeft = (this.width / 2) - (PANEL_WIDTH / 2);
+            int contentTop = panelTop + CONTENT_TOP_WITH_SEARCH;
+            int contentBottom = getListBottom(panelTop);
+            int leftPaneRight = panelLeft + PLAYLISTS_LEFT_WIDTH;
+            boolean inLeftPane = mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= contentTop + 8 && mouseY <= contentBottom;
+
             if (openedProfilePlaylistId != null) {
                 ProfilePlaylistSummary opened = findProfilePlaylistById(openedProfilePlaylistId);
+                int detailTop = contentTop + 50;
+                int visibleItems = Math.max(1, (contentBottom - detailTop) / 21);
                 int max = opened == null ? 0 : Math.max(0, opened.tracks.size() - visibleItems);
                 playlistDetailScrollOffset = Math.max(0, Math.min(playlistDetailScrollOffset - (int) verticalAmount, max));
+            } else if (inLeftPane) {
+                int profileVisible = Math.max(1, (contentBottom - (contentTop + 8)) / 24);
+                profileScrollOffset = Math.max(0, Math.min(profileScrollOffset - (int) verticalAmount, Math.max(0, getFilteredProfiles().size() - profileVisible)));
             } else {
-                profileScrollOffset = Math.max(0, Math.min(profileScrollOffset - (int) verticalAmount, Math.max(0, getFilteredProfiles().size() - visibleItems)));
+                ProfileSummary selected = getSelectedProfile();
+                int listTop = contentTop + 28;
+                int visibleItems = Math.max(1, (contentBottom - listTop) / 21);
+                int total = selected == null ? 0 : getPlaylistsForRightPane(selected).size();
+                profilePlaylistScrollOffset = Math.max(0, Math.min(profilePlaylistScrollOffset - (int) verticalAmount, Math.max(0, total - visibleItems)));
             }
         } else {
-            int maxRecent = Math.max(0, recentlyPlayed.size() - RECENT_UI_MAX_VISIBLE);
+            int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
+            int listBottom = getListBottom(panelTop);
+            int visibleRecent = Math.max(1, Math.min((listBottom - listTop) / 22, RECENT_UI_MAX_VISIBLE));
+            int maxRecent = Math.max(0, recentlyPlayed.size() - visibleRecent);
             recentlyPlayedScrollOffset = Math.max(0, Math.min(recentlyPlayedScrollOffset - (int) verticalAmount, maxRecent));
         }
         return true;
@@ -1463,6 +1603,7 @@ public class MineifyScreen extends Screen {
     private void addToQueue(SearchResult result) {
         MineifyClient.LOGGER.info("Adding to queue: {}", result.title);
         ClientPlayNetworking.send(new AddToPlaylistPacket(result.videoId, result.title, result.duration));
+        playUiSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 0.65f, 1.15f);
         this.currentTab = 1;
     }
 
@@ -1471,6 +1612,7 @@ public class MineifyScreen extends Screen {
         this.pendingPlaylistSearchResult = result;
         this.showPlaylistPicker = true;
         this.showCreatePlaylistDialog = false;
+        playUiSound(SoundEvents.BLOCK_NOTE_BLOCK_PLING, 0.65f, 1.25f);
         updateCreatePlaylistControls();
     }
 
@@ -1519,6 +1661,9 @@ public class MineifyScreen extends Screen {
 
     public void updateProfiles(List<ProfileSummary> entries) {
         this.profiles = entries;
+        this.profileScrollOffset = 0;
+        this.profilePlaylistScrollOffset = 0;
+        this.playlistDetailScrollOffset = 0;
         ensureSelectedProfile();
     }
 
@@ -1584,7 +1729,7 @@ public class MineifyScreen extends Screen {
         boolean hasTrack = nowPlaying != null;
         if (pauseResumeButton != null) {
             pauseResumeButton.active = hasTrack;
-            pauseResumeButton.setMessage(Text.literal(playbackPaused ? "Resume" : "Pause"));
+            pauseResumeButton.setMessage(Text.literal(playbackPaused ? ">" : "||"));
         }
         if (skipButton != null) {
             skipButton.active = hasTrack;
@@ -1609,8 +1754,9 @@ public class MineifyScreen extends Screen {
         int panelTop = (this.height / 2) - (PANEL_HEIGHT / 2);
         int listTop = panelTop + CONTENT_TOP_NO_SEARCH;
         int listBottom = getListBottom(panelTop);
+        int minIndex = nowPlaying != null ? 1 : 0;
         if (mouseY < listTop) {
-            return 0;
+            return minIndex;
         }
         if (mouseY > listBottom) {
             return playlist.size() - 1;
@@ -1618,8 +1764,8 @@ public class MineifyScreen extends Screen {
 
         int relative = (int) ((mouseY - listTop) / LIST_ITEM_HEIGHT);
         int index = playlistScrollOffset + relative;
-        if (index < 0) {
-            return 0;
+        if (index < minIndex) {
+            return minIndex;
         }
         return Math.min(index, playlist.size() - 1);
     }
@@ -1633,6 +1779,7 @@ public class MineifyScreen extends Screen {
         showCreatePlaylistDialog = true;
         showPlaylistPicker = false;
         newPlaylistPublic = true;
+        playUiSound(SoundEvents.ITEM_BOOK_PAGE_TURN, 0.65f, 1.00f);
         if (newPlaylistNameField != null) {
             newPlaylistNameField.setText("");
             newPlaylistNameField.setEditable(true);
@@ -1687,6 +1834,7 @@ public class MineifyScreen extends Screen {
                 pendingPlaylistSearchResult.title,
                 pendingPlaylistSearchResult.duration
         ));
+        playUiSound(SoundEvents.BLOCK_NOTE_BLOCK_BELL, 0.7f, 1.1f);
 
         closeCreatePlaylistDialog();
         pendingPlaylistSearchResult = null;
@@ -1703,7 +1851,20 @@ public class MineifyScreen extends Screen {
                 pendingPlaylistSearchResult.title,
                 pendingPlaylistSearchResult.duration
         ));
+        playUiSound(SoundEvents.ENTITY_ITEM_PICKUP, 0.6f, 1.2f);
     }
+
+    private void playUiSound(RegistryEntry.Reference<SoundEvent> sound, float volume, float pitch) {
+        playUiSound(sound.value(), volume, pitch);
+    }
+
+    private void playUiSound(SoundEvent sound, float volume, float pitch) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player != null) {
+            client.player.playSound(sound, volume, pitch);
+        }
+    }
+
 
     public static class SpotifyChoiceOption {
         public final String videoId;
