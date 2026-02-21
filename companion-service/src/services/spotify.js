@@ -1,14 +1,17 @@
 import fs from 'fs';
-import path from 'path';
 import crypto from 'crypto';
 
 const SPOTIFY_SCOPES = 'playlist-read-private playlist-read-collaborative';
 const TOKEN_STORE_PATH = process.env.SPOTIFY_TOKEN_STORE || './spotify_tokens.json';
 const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || 'http://localhost:3001/api/spotify/callback';
 const AUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const SHARED_ACCOUNT_MODE = String(process.env.SPOTIFY_SHARED_ACCOUNT_MODE || '').toLowerCase() === 'true'
+    || process.env.SPOTIFY_SHARED_ACCOUNT_MODE === '1';
+const SHARED_ACCOUNT_OWNER_ID_ENV = (process.env.SPOTIFY_SHARED_ACCOUNT_OWNER_ID || '').trim();
 
 const spotifyTokensByPlayer = new Map();
 const authStateById = new Map();
+let sharedAccountOwnerId = SHARED_ACCOUNT_OWNER_ID_ENV || '';
 
 class SpotifyAuthRequiredError extends Error {
     constructor(message, authUrl) {
@@ -28,7 +31,13 @@ function loadTokenStore() {
         if (!parsed || typeof parsed !== 'object') {
             return;
         }
+        if (parsed._meta && typeof parsed._meta === 'object' && typeof parsed._meta.sharedAccountOwnerId === 'string') {
+            sharedAccountOwnerId = sharedAccountOwnerId || parsed._meta.sharedAccountOwnerId.trim();
+        }
         for (const [playerId, value] of Object.entries(parsed)) {
+            if (playerId === '_meta') {
+                continue;
+            }
             if (!value || typeof value !== 'object') {
                 continue;
             }
@@ -48,10 +57,27 @@ function loadTokenStore() {
 
 function saveTokenStore() {
     const out = {};
+    out._meta = {
+        sharedAccountOwnerId: sharedAccountOwnerId || ''
+    };
     for (const [playerId, token] of spotifyTokensByPlayer.entries()) {
         out[playerId] = token;
     }
     fs.writeFileSync(TOKEN_STORE_PATH, JSON.stringify(out, null, 2), 'utf8');
+}
+
+function getImportTokenOwnerId(requestingPlayerId) {
+    if (!SHARED_ACCOUNT_MODE) {
+        return requestingPlayerId;
+    }
+    if (SHARED_ACCOUNT_OWNER_ID_ENV) {
+        return SHARED_ACCOUNT_OWNER_ID_ENV;
+    }
+    if (sharedAccountOwnerId) {
+        return sharedAccountOwnerId;
+    }
+    // Bootstrap shared mode with first account that links successfully.
+    return requestingPlayerId;
 }
 
 function extractPlaylistId(spotifyUrl) {
@@ -294,8 +320,9 @@ export function getSpotifyAuthStartUrl(playerId) {
         throw new Error('Missing playerId');
     }
     cleanupAuthStates();
-    const stateId = createAuthState(playerId.trim());
-    return buildAuthUrl(playerId.trim(), stateId);
+    const tokenOwnerId = getImportTokenOwnerId(playerId.trim());
+    const stateId = createAuthState(tokenOwnerId);
+    return buildAuthUrl(tokenOwnerId, stateId);
 }
 
 export async function completeSpotifyAuthCallback(code, state) {
@@ -324,6 +351,9 @@ export async function completeSpotifyAuthCallback(code, state) {
         spotifyUserId: me?.id || '',
         spotifyDisplayName: me?.display_name || me?.id || 'Spotify User'
     });
+    if (SHARED_ACCOUNT_MODE && !SHARED_ACCOUNT_OWNER_ID_ENV && !sharedAccountOwnerId) {
+        sharedAccountOwnerId = stateValue.playerId;
+    }
     saveTokenStore();
     return {
         playerId: stateValue.playerId,
@@ -342,7 +372,8 @@ export async function getSpotifyPlaylistTracks(spotifyUrl, playerId) {
     }
 
     cleanupAuthStates();
-    const accessToken = await getPlayerAccessToken(playerId.trim());
+    const tokenOwnerId = getImportTokenOwnerId(playerId.trim());
+    const accessToken = await getPlayerAccessToken(tokenOwnerId);
     const metadata = await fetchPlaylistMetadata(playlistId, accessToken);
     const tracks = [];
     let offset = 0;
