@@ -19,6 +19,9 @@ import java.util.concurrent.Executors;
 
 @Environment(EnvType.CLIENT)
 public class AudioPlayer {
+    private static final int MAX_LOAD_ATTEMPTS = 3;
+    private static final long LOAD_RETRY_DELAY_MS = 350L;
+
     private static AudioPlayer instance;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
@@ -28,6 +31,7 @@ public class AudioPlayer {
     });
 
     private volatile Clip currentClip;
+    private volatile String currentDownloadUrl = null;
     private volatile String currentTitle = "";
     private volatile boolean playing = false;
     private volatile boolean paused = false;
@@ -49,87 +53,109 @@ public class AudioPlayer {
 
     public void play(String downloadUrl, String title, long serverElapsedMs, long packetReceivedAtNanos) {
         executor.submit(() -> {
+            // Seek updates reuse the loaded clip to avoid re-downloading and audio gaps.
+            if (currentClip != null && currentClip.isOpen() && downloadUrl != null && downloadUrl.equals(currentDownloadUrl)) {
+                applySeekToLoadedClip(title, serverElapsedMs, packetReceivedAtNanos);
+                return;
+            }
             fadeOutAndStopCurrent();
-            try {
-                MineifyClient.LOGGER.info("Downloading audio from: {}", downloadUrl);
-                URL url = new URL(downloadUrl);
-                AudioInputStream ais = AudioSystem.getAudioInputStream(url);
+            Exception lastError = null;
+            for (int attempt = 1; attempt <= MAX_LOAD_ATTEMPTS; attempt++) {
+                try {
+                    String requestUrl = downloadUrl;
+                    if (attempt > 1) {
+                        String sep = downloadUrl.contains("?") ? "&" : "?";
+                        requestUrl = downloadUrl + sep + "retry=" + attempt + "&ts=" + System.nanoTime();
+                    }
+                    MineifyClient.LOGGER.info("Downloading audio from: {} (attempt {}/{})", requestUrl, attempt, MAX_LOAD_ATTEMPTS);
+                    URL url = new URL(requestUrl);
+                    AudioInputStream ais = AudioSystem.getAudioInputStream(url);
 
-                AudioFormat baseFormat = ais.getFormat();
-                AudioFormat playFormat = new AudioFormat(
-                        AudioFormat.Encoding.PCM_SIGNED,
-                        baseFormat.getSampleRate(),
-                        16,
-                        baseFormat.getChannels(),
-                        baseFormat.getChannels() * 2,
-                        baseFormat.getSampleRate(),
-                        false
-                );
+                    AudioFormat baseFormat = ais.getFormat();
+                    AudioFormat playFormat = new AudioFormat(
+                            AudioFormat.Encoding.PCM_SIGNED,
+                            baseFormat.getSampleRate(),
+                            16,
+                            baseFormat.getChannels(),
+                            baseFormat.getChannels() * 2,
+                            baseFormat.getSampleRate(),
+                            false
+                    );
 
-                if (!baseFormat.matches(playFormat)) {
-                    ais = AudioSystem.getAudioInputStream(playFormat, ais);
-                }
+                    if (!baseFormat.matches(playFormat)) {
+                        ais = AudioSystem.getAudioInputStream(playFormat, ais);
+                    }
 
-                Clip clip = AudioSystem.getClip();
-                clip.open(ais);
-                clip.addLineListener(event -> {
-                    if (event.getType() == LineEvent.Type.STOP && playing) {
-                        if (suppressStopCallback) {
-                            suppressStopCallback = false;
+                    Clip clip = AudioSystem.getClip();
+                    clip.open(ais);
+                    clip.addLineListener(event -> {
+                        if (event.getType() == LineEvent.Type.STOP && playing) {
+                            if (suppressStopCallback) {
+                                suppressStopCallback = false;
+                                return;
+                            }
+                            playing = false;
+                            paused = false;
+                            currentTitle = "";
+                            MineifyClient.LOGGER.info("Audio playback finished");
+                        }
+                    });
+
+                    currentClip = clip;
+                    currentDownloadUrl = downloadUrl;
+                    currentTitle = title;
+                    playing = false;
+                    paused = false;
+                    setClipVolume(clip, 0.0f);
+
+                    long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
+                    if (startOffsetMs > 0) {
+                        long clipLengthUs = clip.getMicrosecondLength();
+                        long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
+
+                        if (targetPositionUs >= clipLengthUs) {
+                            MineifyClient.LOGGER.info("Skipping playback for '{}' because track already finished", title);
+                            stopInternal();
                             return;
                         }
-                        playing = false;
-                        paused = false;
-                        currentTitle = "";
-                        MineifyClient.LOGGER.info("Audio playback finished");
-                    }
-                });
 
-                currentClip = clip;
-                currentTitle = title;
-                playing = false;
-                paused = false;
-                setClipVolume(clip, 0.0f);
-
-                long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
-                if (startOffsetMs > 0) {
-                    long clipLengthUs = clip.getMicrosecondLength();
-                    long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
-
-                    if (targetPositionUs >= clipLengthUs) {
-                        MineifyClient.LOGGER.info("Skipping playback for '{}' because track already finished", title);
-                        stopInternal();
-                        return;
+                        clip.setMicrosecondPosition(targetPositionUs);
+                        MineifyClient.LOGGER.info("Seeking '{}' to {} ms based on server real-time sync", title, targetPositionUs / 1000);
                     }
 
-                    clip.setMicrosecondPosition(targetPositionUs);
-                    MineifyClient.LOGGER.info("Seeking '{}' to {} ms based on server real-time sync", title, targetPositionUs / 1000);
+                    if (pendingPause) {
+                        paused = true;
+                        MineifyClient.LOGGER.info("Loaded '{}' in paused state", title);
+                    } else {
+                        suppressMinecraftMusic();
+                        clip.start();
+                        playing = true;
+                        fadeToVolume(clip, volume, MineifyConfig.getPlaybackCrossfadeMs());
+                        MineifyClient.LOGGER.info("Playing: {}", title);
+                    }
+                    return;
+                } catch (Exception e) {
+                    lastError = e;
+                    MineifyClient.LOGGER.warn("Audio load failed for '{}' (attempt {}/{}): {}", title, attempt, MAX_LOAD_ATTEMPTS, e.toString());
+                    stopInternal();
+                    if (attempt < MAX_LOAD_ATTEMPTS) {
+                        try {
+                            Thread.sleep(LOAD_RETRY_DELAY_MS);
+                        } catch (InterruptedException ignored) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
                 }
-
-                if (pendingPause) {
-                    paused = true;
-                    MineifyClient.LOGGER.info("Loaded '{}' in paused state", title);
-                } else {
-                    suppressMinecraftMusic();
-                    clip.start();
-                    playing = true;
-                    fadeToVolume(clip, volume, MineifyConfig.getPlaybackCrossfadeMs());
-                    MineifyClient.LOGGER.info("Playing: {}", title);
-                }
-            } catch (Exception e) {
-                MineifyClient.LOGGER.error("Audio playback failed for: {}", title, e);
-                playing = false;
-                paused = false;
-                currentTitle = "";
-                restoreMinecraftMusic();
             }
-        });
-    }
 
-    private long calculateStartOffsetMs(long serverElapsedMs, long packetReceivedAtNanos) {
-        long elapsedSinceReceiveMs = Math.max(0, (System.nanoTime() - packetReceivedAtNanos) / 1_000_000L);
-        long baseOffsetMs = Math.max(0, serverElapsedMs);
-        return baseOffsetMs + elapsedSinceReceiveMs;
+            MineifyClient.LOGGER.error("Audio playback failed for: {}", title, lastError);
+            playing = false;
+            paused = false;
+            currentTitle = "";
+            currentDownloadUrl = null;
+            restoreMinecraftMusic();
+        });
     }
 
     public void stop() {
@@ -142,6 +168,37 @@ public class AudioPlayer {
 
     public void resume() {
         executor.submit(this::resumeInternal);
+    }
+    private void applySeekToLoadedClip(String title, long serverElapsedMs, long packetReceivedAtNanos) {
+        Clip clip = currentClip;
+        if (clip == null || !clip.isOpen()) {
+            return;
+        }
+        long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
+        long clipLengthUs = clip.getMicrosecondLength();
+        long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
+        if (targetPositionUs >= clipLengthUs) {
+            stopInternal();
+            return;
+        }
+        clip.setMicrosecondPosition(targetPositionUs);
+        currentTitle = title;
+        if (!pendingPause && !clip.isRunning()) {
+            suppressMinecraftMusic();
+            clip.start();
+            playing = true;
+            paused = false;
+            applyVolume(clip);
+        }
+    }
+
+    private long calculateStartOffsetMs(long serverElapsedMs, long packetReceivedAtNanos) {
+        // Do not include local decode/load time in sync math, or tracks jump forward silently.
+        // Only compensate a tiny amount for packet transit/scheduling jitter.
+        long elapsedSinceReceiveMs = Math.max(0, (System.nanoTime() - packetReceivedAtNanos) / 1_000_000L);
+        long boundedCompensationMs = Math.min(200L, elapsedSinceReceiveMs);
+        long baseOffsetMs = Math.max(0, serverElapsedMs);
+        return baseOffsetMs + boundedCompensationMs;
     }
 
     private void pauseInternal() {
@@ -175,6 +232,7 @@ public class AudioPlayer {
         playing = false;
         paused = false;
         currentTitle = "";
+        currentDownloadUrl = null;
         Clip clip = currentClip;
         if (clip != null) {
             suppressStopCallback = true;

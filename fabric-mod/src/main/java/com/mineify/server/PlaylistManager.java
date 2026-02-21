@@ -29,6 +29,7 @@ import java.io.Reader;
 import java.io.Writer;
 import java.lang.reflect.Type;
 import java.net.URI;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -47,6 +48,25 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 public class PlaylistManager {
+    private static final String PERM_SEARCH = "mineify.search";
+    private static final String PERM_QUEUE_ADD = "mineify.queue.add";
+    private static final String PERM_QUEUE_REMOVE = "mineify.queue.remove";
+    private static final String PERM_QUEUE_REORDER = "mineify.queue.reorder";
+    private static final String PERM_QUEUE_UNDO = "mineify.queue.undo";
+    private static final String PERM_QUEUE_CLEAR = "mineify.queue.clear";
+    private static final String PERM_PLAYBACK_SKIP = "mineify.playback.skip";
+    private static final String PERM_PLAYBACK_PAUSE = "mineify.playback.pause";
+    private static final String PERM_PLAYBACK_RESUME = "mineify.playback.resume";
+    private static final String PERM_PLAYBACK_SEEK = "mineify.playback.seek";
+    private static final String PERM_PLAYLISTS_VIEW = "mineify.playlists.view";
+    private static final String PERM_PLAYLISTS_CREATE = "mineify.playlists.create";
+    private static final String PERM_PLAYLISTS_ADD_TRACK = "mineify.playlists.add_track";
+    private static final String PERM_PLAYLISTS_LIKE = "mineify.playlists.like";
+    private static final String PERM_SPOTIFY_IMPORT = "mineify.spotify.import";
+    private static final String PERM_RECENTLY_PLAYED_VIEW = "mineify.recently_played.view";
+    private static volatile Method permissionsCheckMethod;
+    private static volatile boolean permissionsLookupDone = false;
+
     private final MinecraftServer server;
     private final CompanionClient companionClient;
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
@@ -73,6 +93,7 @@ public class PlaylistManager {
     private long playbackStartNanos = 0;
     private long currentTrackDurationMs = 0;
     private String currentDownloadUrl = null;
+    private long playbackRequestNonce = 0L;
     private ScheduledFuture<?> advanceFuture;
     private ScheduledFuture<?> progressFuture;
 
@@ -144,6 +165,10 @@ public class PlaylistManager {
     }
 
     public void handleSearch(ServerPlayerEntity player, String query) {
+        if (!hasPerm(player, PERM_SEARCH, true)) {
+            player.sendMessage(Text.literal("You don't have permission to search tracks."), false);
+            return;
+        }
         Mineify.LOGGER.info("Player {} searching for: {}", player.getName().getString(), query);
 
         companionClient.search(query).thenAccept(results -> {
@@ -160,6 +185,10 @@ public class PlaylistManager {
     }
 
     public void handleAddToPlaylist(ServerPlayerEntity player, String videoId, String title, String duration) {
+        if (!hasPerm(player, PERM_QUEUE_ADD, true)) {
+            player.sendMessage(Text.literal("You don't have permission to add songs to queue."), false);
+            return;
+        }
         Mineify.LOGGER.info("Player {} adding to playlist: {}", player.getName().getString(), title);
         if (playlist.size() >= MineifyConfig.getMaxPlaylistSize()) {
             player.sendMessage(net.minecraft.text.Text.literal("Queue is full (max " + MineifyConfig.getMaxPlaylistSize() + ")."), false);
@@ -179,31 +208,33 @@ public class PlaylistManager {
     }
 
     public void handleRemoveFromPlaylist(ServerPlayerEntity player, String videoId) {
-        String playerName = player.getName().getString();
-
+        if (!hasPerm(player, PERM_QUEUE_REMOVE, true)) {
+            player.sendMessage(Text.literal("You don't have permission to remove songs from queue."), false);
+            return;
+        }
         int removeIndex = -1;
         for (int i = 0; i < playlist.size(); i++) {
             PlaylistSyncPacket.Entry entry = playlist.get(i);
-            if (entry.videoId().equals(videoId) && entry.addedBy().equals(playerName)) {
+            if (entry.videoId().equals(videoId)) {
                 removeIndex = i;
                 break;
             }
         }
 
         if (removeIndex == -1) {
-            Mineify.LOGGER.warn("{} tried to remove {} but doesn't own it or it doesn't exist", playerName, videoId);
             return;
         }
         pushQueueUndoSnapshot("remove");
 
         playlist.remove(removeIndex);
-        Mineify.LOGGER.info("{} removed {} from playlist", playerName, videoId);
+        Mineify.LOGGER.info("{} removed {} from queue", player.getName().getString(), videoId);
         companionClient.deleteDownload(videoId);
 
         if (currentIndex >= 0) {
             if (removeIndex < currentIndex) {
                 currentIndex--;
             } else if (removeIndex == currentIndex) {
+                playbackRequestNonce++;
                 if (advanceFuture != null) {
                     advanceFuture.cancel(false);
                 }
@@ -220,14 +251,11 @@ public class PlaylistManager {
             return;
         }
 
-        boolean moderatorOnly = MineifyConfig.isModerationRequireOpForGlobalQueueControls();
-        boolean isModerator = !moderatorOnly
-                || (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()
-                && playlist.get(currentIndex).addedBy().equals(player.getName().getString()));
+        boolean legacyPlaybackAllowed = hasLegacyPlaybackControl(player);
 
         switch (action.toLowerCase()) {
             case "skip" -> {
-                if (moderatorOnly && !isModerator) {
+                if (!hasPerm(player, PERM_PLAYBACK_SKIP, legacyPlaybackAllowed)) {
                     player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to skip tracks."), false);
                     return;
                 }
@@ -240,7 +268,7 @@ public class PlaylistManager {
                 }
             }
             case "pause" -> {
-                if (moderatorOnly && !isModerator) {
+                if (!hasPerm(player, PERM_PLAYBACK_PAUSE, legacyPlaybackAllowed)) {
                     player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to pause playback."), false);
                     return;
                 }
@@ -248,7 +276,7 @@ public class PlaylistManager {
                 pausePlayback();
             }
             case "resume" -> {
-                if (moderatorOnly && !isModerator) {
+                if (!hasPerm(player, PERM_PLAYBACK_RESUME, legacyPlaybackAllowed)) {
                     player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to resume playback."), false);
                     return;
                 }
@@ -256,16 +284,27 @@ public class PlaylistManager {
                 resumePlayback();
             }
             case "undo_queue" -> {
+                if (!hasPerm(player, PERM_QUEUE_UNDO, true)) {
+                    player.sendMessage(Text.literal("You don't have permission to undo queue changes."), false);
+                    return;
+                }
                 if (!restoreLatestQueueSnapshot()) {
                     player.sendMessage(net.minecraft.text.Text.literal("Nothing to undo."), false);
                 }
+            }
+            case "clear_queue" -> {
+                if (!hasPerm(player, PERM_QUEUE_CLEAR, legacyPlaybackAllowed)) {
+                    player.sendMessage(Text.literal("You don't have permission to clear queue."), false);
+                    return;
+                }
+                clearQueue();
             }
             default -> {
                 if (action.toLowerCase().startsWith("seek:")) {
                     if (!isPlaying || currentIndex < 0 || currentIndex >= playlist.size()) {
                         return;
                     }
-                    if (moderatorOnly && !isModerator) {
+                    if (!hasPerm(player, PERM_PLAYBACK_SEEK, legacyPlaybackAllowed)) {
                         player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to seek playback."), false);
                         return;
                     }
@@ -310,17 +349,15 @@ public class PlaylistManager {
     }
 
     public void handleQueueReorder(ServerPlayerEntity player, int fromIndex, int toIndex) {
+        if (!hasPerm(player, PERM_QUEUE_REORDER, true)) {
+            player.sendMessage(Text.literal("You don't have permission to reorder queue."), false);
+            return;
+        }
         int size = playlist.size();
         if (fromIndex < 0 || toIndex < 0 || fromIndex >= size || toIndex >= size || fromIndex == toIndex) {
             return;
         }
         if (isPlaying && toIndex == 0) {
-            return;
-        }
-        PlaylistSyncPacket.Entry fromEntry = playlist.get(fromIndex);
-        boolean isModerator = !MineifyConfig.isModerationRequireOpForGlobalQueueControls()
-                || fromEntry.addedBy().equals(player.getName().getString());
-        if (!isModerator && !fromEntry.addedBy().equals(player.getName().getString())) {
             return;
         }
         pushQueueUndoSnapshot("reorder");
@@ -343,10 +380,18 @@ public class PlaylistManager {
     }
 
     public void handleRequestUserPlaylists(ServerPlayerEntity player) {
+        if (!hasPerm(player, PERM_PLAYLISTS_VIEW, true)) {
+            player.sendMessage(Text.literal("You don't have permission to view playlists."), false);
+            return;
+        }
         syncUserPlaylistsToPlayer(player);
     }
 
     public void handleRequestProfiles(ServerPlayerEntity player, String query) {
+        if (!hasPerm(player, PERM_PLAYLISTS_VIEW, true)) {
+            player.sendMessage(Text.literal("You don't have permission to view playlists."), false);
+            return;
+        }
         String normalizedQuery = query == null ? "" : query.toLowerCase(Locale.ROOT).trim();
         List<ProfilesSyncPacket.ProfileEntry> entries = new ArrayList<>();
         String selfId = player.getUuidAsString();
@@ -389,6 +434,10 @@ public class PlaylistManager {
     }
 
     public void handleStartSpotifyImport(ServerPlayerEntity player, String spotifyUrl, String targetPlaylistId) {
+        if (!hasPerm(player, PERM_SPOTIFY_IMPORT, true)) {
+            player.sendMessage(Text.literal("You don't have permission to import Spotify playlists."), false);
+            return;
+        }
         if (!MineifyConfig.isSpotifyImportEnabled()) {
             player.sendMessage(net.minecraft.text.Text.literal("Spotify import is disabled by server config."), false);
             return;
@@ -432,6 +481,10 @@ public class PlaylistManager {
     }
 
     public void handleRequestSpotifyImportPreview(ServerPlayerEntity player, String spotifyUrl) {
+        if (!hasPerm(player, PERM_SPOTIFY_IMPORT, true)) {
+            player.sendMessage(Text.literal("You don't have permission to import Spotify playlists."), false);
+            return;
+        }
         if (!MineifyConfig.isSpotifyImportEnabled()) {
             player.sendMessage(net.minecraft.text.Text.literal("Spotify import is disabled by server config."), false);
             return;
@@ -519,6 +572,10 @@ public class PlaylistManager {
             boolean isPublic,
             List<String> selectedSpotifyTrackIds
     ) {
+        if (!hasPerm(player, PERM_SPOTIFY_IMPORT, true)) {
+            player.sendMessage(Text.literal("You don't have permission to import Spotify playlists."), false);
+            return;
+        }
         if (!MineifyConfig.isSpotifyImportEnabled()) {
             player.sendMessage(net.minecraft.text.Text.literal("Spotify import is disabled by server config."), false);
             return;
@@ -579,6 +636,10 @@ public class PlaylistManager {
     }
 
     public void handleToggleLikedPlaylist(ServerPlayerEntity player, String playlistId, boolean liked) {
+        if (!hasPerm(player, PERM_PLAYLISTS_LIKE, true)) {
+            player.sendMessage(Text.literal("You don't have permission to like playlists."), false);
+            return;
+        }
         if (!MineifyConfig.isPlaylistsLikesEnabled() || playlistId == null || playlistId.isBlank()) {
             return;
         }
@@ -604,6 +665,10 @@ public class PlaylistManager {
     }
 
     public void handleResolveSpotifyImportChoice(ServerPlayerEntity player, String videoId) {
+        if (!hasPerm(player, PERM_SPOTIFY_IMPORT, true)) {
+            player.sendMessage(Text.literal("You don't have permission to import Spotify playlists."), false);
+            return;
+        }
         SpotifyImportSession session = spotifyImportSessions.get(player.getUuidAsString());
         if (session == null || session.pendingTrack == null) {
             return;
@@ -638,6 +703,10 @@ public class PlaylistManager {
     }
 
     public void handleRequestRecentlyPlayed(ServerPlayerEntity player) {
+        if (!hasPerm(player, PERM_RECENTLY_PLAYED_VIEW, true)) {
+            player.sendMessage(Text.literal("You don't have permission to view recently played songs."), false);
+            return;
+        }
         syncRecentlyPlayedToPlayer(player);
     }
 
@@ -650,6 +719,10 @@ public class PlaylistManager {
             String title,
             String duration
     ) {
+        if (!hasPerm(player, PERM_PLAYLISTS_CREATE, true)) {
+            player.sendMessage(Text.literal("You don't have permission to create playlists."), false);
+            return;
+        }
         String trimmedName = name == null ? "" : name.trim();
         if (trimmedName.isEmpty()) {
             return;
@@ -686,6 +759,10 @@ public class PlaylistManager {
             String title,
             String duration
     ) {
+        if (!hasPerm(player, PERM_PLAYLISTS_ADD_TRACK, true)) {
+            player.sendMessage(Text.literal("You don't have permission to add tracks to playlists."), false);
+            return;
+        }
         if (playlistId == null || playlistId.isBlank() || videoId == null || videoId.isBlank()) {
             return;
         }
@@ -724,6 +801,8 @@ public class PlaylistManager {
     }
 
     private void playNext() {
+        playbackRequestNonce++;
+        long requestNonce = playbackRequestNonce;
         currentIndex++;
         if (currentIndex >= playlist.size()) {
             cancelAdvanceSchedule();
@@ -750,11 +829,18 @@ public class PlaylistManager {
         companionClient.requestDownload(entry.videoId()).thenAccept(downloadUrl -> {
             if (downloadUrl == null) {
                 Mineify.LOGGER.error("Download failed for: {}", entry.title());
-                server.execute(this::playNext);
+                server.execute(() -> {
+                    if (requestNonce == playbackRequestNonce) {
+                        playNext();
+                    }
+                });
                 return;
             }
 
             server.execute(() -> {
+                if (requestNonce != playbackRequestNonce || currentIndex < 0 || currentIndex >= playlist.size()) {
+                    return;
+                }
                 currentDownloadUrl = downloadUrl;
                 playbackStartNanos = System.nanoTime();
 
@@ -777,6 +863,7 @@ public class PlaylistManager {
     }
 
     private void advanceAfterTrackEnd() {
+        playbackRequestNonce++;
         if (currentIndex >= 0 && currentIndex < playlist.size()) {
             PlaylistSyncPacket.Entry finished = playlist.remove(currentIndex);
             companionClient.deleteDownload(finished.videoId());
@@ -793,6 +880,7 @@ public class PlaylistManager {
 
         pausedElapsedMs = getElapsedPlaybackMs();
         paused = true;
+        playbackRequestNonce++;
         cancelAdvanceSchedule();
         broadcastPlaybackState(true);
         broadcastNowPlaying(playlist.get(currentIndex).title(), pausedElapsedMs);
@@ -805,6 +893,7 @@ public class PlaylistManager {
 
         playbackStartNanos = System.nanoTime() - (pausedElapsedMs * 1_000_000L);
         paused = false;
+        playbackRequestNonce++;
         broadcastPlaybackState(false);
         broadcastNowPlaying(playlist.get(currentIndex).title(), getElapsedPlaybackMs());
         scheduleAdvanceFromCurrentState();
@@ -1315,6 +1404,93 @@ public class PlaylistManager {
         scheduler.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
+    }
+
+    private boolean hasPerm(ServerPlayerEntity player, String node, boolean fallback) {
+        if (!MineifyConfig.isPermissionsEnabled()) {
+            return true;
+        }
+        Method method = resolvePermissionsCheckMethod();
+        if (method == null) {
+            return fallback;
+        }
+        try {
+            Object value = method.invoke(null, player, node, fallback);
+            if (value instanceof Boolean b) {
+                return b;
+            }
+        } catch (IllegalArgumentException ignored) {
+            try {
+                Object value = method.invoke(null, player.getCommandSource(), node, fallback);
+                if (value instanceof Boolean b) {
+                    return b;
+                }
+            } catch (ReflectiveOperationException ignoredAgain) {
+                return fallback;
+            }
+        } catch (ReflectiveOperationException ignored) {
+            return fallback;
+        }
+        return fallback;
+    }
+
+    private static Method resolvePermissionsCheckMethod() {
+        if (permissionsLookupDone) {
+            return permissionsCheckMethod;
+        }
+        synchronized (PlaylistManager.class) {
+            if (permissionsLookupDone) {
+                return permissionsCheckMethod;
+            }
+            try {
+                Class<?> clazz = Class.forName("me.lucko.fabric.api.permissions.v0.Permissions");
+                for (Method method : clazz.getMethods()) {
+                    if (!"check".equals(method.getName()) || method.getParameterCount() != 3) {
+                        continue;
+                    }
+                    Class<?>[] params = method.getParameterTypes();
+                    if (params[1] == String.class && (params[2] == boolean.class || params[2] == Boolean.class)) {
+                        permissionsCheckMethod = method;
+                        break;
+                    }
+                }
+            } catch (ClassNotFoundException ignored) {
+                permissionsCheckMethod = null;
+            } finally {
+                permissionsLookupDone = true;
+            }
+            return permissionsCheckMethod;
+        }
+    }
+
+    private boolean hasLegacyPlaybackControl(ServerPlayerEntity player) {
+        if (!MineifyConfig.isModerationRequireOpForGlobalQueueControls()) {
+            return true;
+        }
+        if (!isPlaying || currentIndex < 0 || currentIndex >= playlist.size()) {
+            return false;
+        }
+        return playlist.get(currentIndex).addedBy().equals(player.getName().getString());
+    }
+
+    private void clearQueue() {
+        if (playlist.isEmpty() && !isPlaying) {
+            return;
+        }
+        pushQueueUndoSnapshot("clear");
+        playbackRequestNonce++;
+        playlist.clear();
+        cancelAdvanceSchedule();
+        isPlaying = false;
+        paused = false;
+        pausedElapsedMs = 0;
+        currentIndex = -1;
+        currentDownloadUrl = null;
+        playbackStartNanos = 0;
+        currentTrackDurationMs = 0;
+        syncToAll();
+        broadcastNowPlaying("", 0);
+        broadcastPlaybackState(false);
     }
 
     private static class QueueSnapshot {

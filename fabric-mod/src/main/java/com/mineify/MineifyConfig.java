@@ -32,6 +32,7 @@ public class MineifyConfig {
     private static int playlistsMaxNameLength = 50;
     private static boolean playlistsDefaultPublic = true;
     private static boolean playlistsEnableLikes = true;
+    private static boolean permissionsEnabled = false;
 
     static {
         load();
@@ -137,6 +138,13 @@ public class MineifyConfig {
                     if (playlistsObj.has("enableLikes")) {
                         playlistsEnableLikes = playlistsObj.get("enableLikes").getAsBoolean();
                     }
+                }
+
+                JsonObject permissionsObj = obj.has("permissions") && obj.get("permissions").isJsonObject()
+                        ? obj.getAsJsonObject("permissions")
+                        : null;
+                if (permissionsObj != null && permissionsObj.has("enabled")) {
+                    permissionsEnabled = permissionsObj.get("enabled").getAsBoolean();
                 }
 
                 JsonObject uiObj = obj.has("ui") && obj.get("ui").isJsonObject()
@@ -245,5 +253,9 @@ public class MineifyConfig {
 
     public static boolean isPlaylistsLikesEnabled() {
         return playlistsEnableLikes;
+    }
+
+    public static boolean isPermissionsEnabled() {
+        return permissionsEnabled;
     }
 }

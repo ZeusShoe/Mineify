@@ -26,5 +26,8 @@
     "maxNameLength": 50,
     "defaultPublic": true,
     "enableLikes": true
+  },
+  "permissions": {
+    "enabled": false
   }
 }
