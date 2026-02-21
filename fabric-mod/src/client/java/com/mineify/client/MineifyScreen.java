@@ -61,6 +61,8 @@ public class MineifyScreen extends Screen {
     private static final int TAB_BAR_Y = 30;
     private static final int CONTENT_TOP_WITH_SEARCH = 55;
     private static final int CONTENT_TOP_NO_SEARCH = 34;
+    private static final int LIST_INSET_X = 10;
+    private static final int ROW_GAP = 2;
     private static final int MODAL_WIDTH = 220;
     private static final int MODAL_HEIGHT = 140;
     private static final int PLAYLISTS_LEFT_WIDTH = 130;
@@ -74,7 +76,6 @@ public class MineifyScreen extends Screen {
     private ButtonWidget searchButton;
     private ButtonWidget pauseResumeButton;
     private ButtonWidget skipButton;
-    private ButtonWidget compactModeButton;
     private ButtonWidget undoQueueButton;
     private SliderWidget volumeSlider;
     private TextFieldWidget newPlaylistNameField;
@@ -106,8 +107,6 @@ public class MineifyScreen extends Screen {
     private int profilePlaylistScrollOffset = 0;
     private int recentlyPlayedScrollOffset = 0;
     private int rightPaneTab = 0; // 0: Player's Playlists, 1: Player's Liked Playlists
-    private boolean compactMode = MineifyConfig.isUiCompactDefault();
-
     private String nowPlaying = null;
     private float playbackProgress = 0f;
     private long playbackElapsedMs = 0;
@@ -135,6 +134,7 @@ public class MineifyScreen extends Screen {
     private int contextMenuX = 0;
     private int contextMenuY = 0;
     private ContextMenuState contextMenuState = null;
+    private boolean nowPlayingBarHovered = false;
 
     private String currentPlayerName;
 
@@ -199,16 +199,6 @@ public class MineifyScreen extends Screen {
                 .build();
         this.addDrawableChild(recentTabBtn);
 
-        this.compactModeButton = ButtonWidget.builder(
-                        Text.literal(compactMode ? "Compact" : "Expanded"),
-                        button -> {
-                            compactMode = !compactMode;
-                            compactModeButton.setMessage(Text.literal(compactMode ? "Compact" : "Expanded"));
-                        })
-                .dimensions(panelLeft + PANEL_WIDTH - 78, panelTop + 5, 68, 20)
-                .build();
-        this.addDrawableChild(this.compactModeButton);
-
         int controlButtonY = bottomSectionTop + ((NOW_PLAYING_HEIGHT - 18) / 2);
 
         this.pauseResumeButton = ButtonWidget.builder(Text.literal("⏸"), button -> {
@@ -224,7 +214,7 @@ public class MineifyScreen extends Screen {
         this.undoQueueButton = ButtonWidget.builder(Text.literal("Undo"), button -> {
                     ClientPlayNetworking.send(new PlaybackControlPacket("undo_queue"));
                 })
-                .dimensions(panelLeft + PANEL_WIDTH - 60, panelTop + CONTENT_TOP_NO_SEARCH - 18, 50, 14)
+                .dimensions(panelLeft + PANEL_WIDTH - 68, bottomSectionTop - 20, 58, 16)
                 .build();
         this.undoQueueButton.visible = false;
         this.undoQueueButton.active = false;
@@ -397,11 +387,12 @@ public class MineifyScreen extends Screen {
         int panelLeft = centerX - PANEL_WIDTH / 2;
         int panelTop = centerY - PANEL_HEIGHT / 2;
 
-        context.fill(panelLeft, panelTop, panelLeft + PANEL_WIDTH, panelTop + PANEL_HEIGHT, 0xE0101010);
-        context.drawHorizontalLine(panelLeft, panelLeft + PANEL_WIDTH - 1, panelTop, 0xFFAAAAAA);
-        context.drawHorizontalLine(panelLeft, panelLeft + PANEL_WIDTH - 1, panelTop + PANEL_HEIGHT - 1, 0xFF555555);
-        context.drawVerticalLine(panelLeft, panelTop, panelTop + PANEL_HEIGHT - 1, 0xFFAAAAAA);
-        context.drawVerticalLine(panelLeft + PANEL_WIDTH - 1, panelTop, panelTop + PANEL_HEIGHT - 1, 0xFF555555);
+        context.fill(panelLeft, panelTop, panelLeft + PANEL_WIDTH, panelTop + PANEL_HEIGHT, 0xE012141A);
+        context.fill(panelLeft + 1, panelTop + 1, panelLeft + PANEL_WIDTH - 1, panelTop + 28, 0x221A1D24);
+        context.drawHorizontalLine(panelLeft, panelLeft + PANEL_WIDTH - 1, panelTop, 0xFF9EA8B7);
+        context.drawHorizontalLine(panelLeft, panelLeft + PANEL_WIDTH - 1, panelTop + PANEL_HEIGHT - 1, 0xFF4D5664);
+        context.drawVerticalLine(panelLeft, panelTop, panelTop + PANEL_HEIGHT - 1, 0xFF9EA8B7);
+        context.drawVerticalLine(panelLeft + PANEL_WIDTH - 1, panelTop, panelTop + PANEL_HEIGHT - 1, 0xFF4D5664);
 
         int titleY = Math.max(4, panelTop - 15);
         context.drawCenteredTextWithShadow(this.textRenderer, this.title, centerX, titleY, 0xFFFFFFFF);
@@ -448,7 +439,7 @@ public class MineifyScreen extends Screen {
             renderRecentlyPlayedTab(context, panelLeft, panelTop);
         }
 
-        renderNowPlaying(context, panelLeft, panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING));
+        renderNowPlaying(context, panelLeft, panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING), mouseX, mouseY);
         renderPlaylistModals(context, mouseX, mouseY);
         renderSpotifyPreviewModal(context, mouseX, mouseY);
         renderSpotifyPromptModal(context);
@@ -461,11 +452,11 @@ public class MineifyScreen extends Screen {
     }
 
     private int getSearchRowHeight() {
-        return compactMode ? 20 : LIST_ITEM_HEIGHT;
+        return LIST_ITEM_HEIGHT;
     }
 
     private int getQueueRowHeight() {
-        return compactMode ? 20 : LIST_ITEM_HEIGHT;
+        return LIST_ITEM_HEIGHT;
     }
 
     private void renderSearchTab(DrawContext context, int panelLeft, int panelTop, int mouseX, int mouseY) {
@@ -474,6 +465,7 @@ public class MineifyScreen extends Screen {
         int itemHeight = getSearchRowHeight();
         int visibleItems = Math.max(1, (listBottom - listTop) / itemHeight);
         searchScrollOffset = Math.max(0, Math.min(searchScrollOffset, Math.max(0, searchResults.size() - visibleItems)));
+        context.fill(panelLeft + LIST_INSET_X, listTop - 2, panelLeft + PANEL_WIDTH - LIST_INSET_X, listBottom, 0x1A000000);
 
         if (searchResults.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Search for songs above"),
@@ -486,10 +478,10 @@ public class MineifyScreen extends Screen {
                 boolean hovered = mouseX >= panelLeft + 10 && mouseX <= panelLeft + PANEL_WIDTH - 10
                         && mouseY >= y && mouseY < y + itemHeight;
 
-                int bgColor = hovered ? 0x44FFFFFF : 0x22FFFFFF;
-                context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + itemHeight - 2, bgColor);
+                int bgColor = hovered ? 0x55343A46 : 0x33252A33;
+                context.fill(panelLeft + LIST_INSET_X, y, panelLeft + PANEL_WIDTH - LIST_INSET_X, y + itemHeight - ROW_GAP, bgColor);
 
-                int rowRight = panelLeft + PANEL_WIDTH - 10 - SEARCH_ACTION_ROW_RIGHT_PADDING;
+                int rowRight = panelLeft + PANEL_WIDTH - LIST_INSET_X - SEARCH_ACTION_ROW_RIGHT_PADDING;
                 int queueButtonX = rowRight - SEARCH_QUEUE_BUTTON_WIDTH;
                 int playlistButtonX = queueButtonX - SEARCH_BUTTON_GAP - SEARCH_PLAYLIST_BUTTON_WIDTH;
                 int buttonY = y + 4;
@@ -497,10 +489,8 @@ public class MineifyScreen extends Screen {
                 int titleMaxWidth = Math.max(20, playlistButtonX - (panelLeft + 15) - 6);
                 String title = truncateText(result.title, titleMaxWidth);
                 context.drawTextWithShadow(this.textRenderer, Text.literal(title), panelLeft + 15, y + 4, 0xFFFFFFFF);
-                if (!compactMode) {
-                    String channel = truncateText(result.channel, titleMaxWidth);
-                    context.drawTextWithShadow(this.textRenderer, Text.literal(channel), panelLeft + 15, y + 14, 0xFF888888);
-                }
+                String channel = truncateText(result.channel, titleMaxWidth);
+                context.drawTextWithShadow(this.textRenderer, Text.literal(channel), panelLeft + 15, y + 14, 0xFF888888);
 
                 boolean playlistHovered = mouseX >= playlistButtonX && mouseX <= playlistButtonX + SEARCH_PLAYLIST_BUTTON_WIDTH
                         && mouseY >= buttonY && mouseY <= buttonY + 16;
@@ -549,6 +539,7 @@ public class MineifyScreen extends Screen {
         int rowStep = itemHeight;
         int visibleItems = Math.max(1, (listBottom - listTop) / rowStep);
         playlistScrollOffset = Math.max(0, Math.min(playlistScrollOffset, Math.max(0, playlist.size() - visibleItems)));
+        context.fill(panelLeft + LIST_INSET_X, listTop - 2, panelLeft + PANEL_WIDTH - LIST_INSET_X, listBottom, 0x1A000000);
 
         if (playlist.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue is empty"),
@@ -564,11 +555,11 @@ public class MineifyScreen extends Screen {
                         && mouseY >= y && mouseY < y + itemHeight;
                 boolean isPlaying = i == 0 && nowPlaying != null;
 
-                int bgColor = isPlaying ? 0x4400FF00 : (hovered ? 0x44FFFFFF : 0x22FFFFFF);
-                context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + itemHeight - 2, bgColor);
+                int bgColor = isPlaying ? 0x77338A33 : (hovered ? 0x55343A46 : 0x33252A33);
+                context.fill(panelLeft + LIST_INSET_X, y, panelLeft + PANEL_WIDTH - LIST_INSET_X, y + itemHeight - ROW_GAP, bgColor);
                 if (queueDragActive && i == queueDragTargetIndex) {
                     int markerY = y + 1;
-                    context.fill(panelLeft + 12, markerY, panelLeft + PANEL_WIDTH - 12, markerY + 2, 0xAAFFFF55);
+                    context.fill(panelLeft + LIST_INSET_X + 2, markerY, panelLeft + PANEL_WIDTH - LIST_INSET_X - 2, markerY + 2, 0xAAFFFF55);
                 }
 
                 String pos = (i + 1) + ".";
@@ -579,15 +570,11 @@ public class MineifyScreen extends Screen {
                 String title = truncateText(entry.title, titleMaxWidth);
                 context.drawTextWithShadow(this.textRenderer, Text.literal(title), panelLeft + 35, y + 4, 0xFFFFFFFF);
 
-                String addedBy = isPlaying ? "Now Playing • by " + entry.addedBy : "by " + entry.addedBy;
-                if (!compactMode) {
-                    context.drawTextWithShadow(this.textRenderer, Text.literal(addedBy), panelLeft + 35, y + 14, 0xFF888888);
-                } else if (isPlaying) {
-                    context.drawTextWithShadow(this.textRenderer, Text.literal("Now Playing"), panelLeft + 35, y + 11, 0xFF88FF88);
-                }
+                String addedBy = isPlaying ? "Now Playing • added by " + entry.addedBy : "added by " + entry.addedBy;
+                context.drawTextWithShadow(this.textRenderer, Text.literal(addedBy), panelLeft + 35, y + 14, 0xFF888888);
 
                 if (canRemove) {
-                    int removeX = panelLeft + PANEL_WIDTH - 25;
+                    int removeX = panelLeft + PANEL_WIDTH - LIST_INSET_X - 15;
                     int removeY = y + 5;
                     boolean removeHovered = mouseX >= removeX && mouseX <= removeX + 15
                             && mouseY >= removeY && mouseY <= removeY + 15;
@@ -611,7 +598,7 @@ public class MineifyScreen extends Screen {
         int detailsRight = panelLeft + PANEL_WIDTH - 10;
 
         context.fill(panelLeft + 6, contentTop, leftPaneRight, contentBottom, 0x33000000);
-        context.fill(leftPaneRight + 2, contentTop, detailsRight, contentBottom, 0x22000000);
+        context.fill(leftPaneRight + 2, contentTop, detailsRight, contentBottom, 0x1F000000);
 
         int tabY = contentTop + 4;
         int playlistsTabX = panelLeft + PLAYLISTS_LEFT_WIDTH + 8;
@@ -634,7 +621,7 @@ public class MineifyScreen extends Screen {
             ProfileSummary profile = visibleProfiles.get(i);
             boolean selected = profile.ownerId.equals(selectedProfileId);
             boolean hovered = mouseX >= panelLeft + 8 && mouseX <= leftPaneRight - 2 && mouseY >= rowY && mouseY <= rowY + rowHeight;
-            int color = selected ? 0x6644AA44 : (hovered ? 0x44444444 : 0x22222222);
+            int color = selected ? 0x66449C44 : (hovered ? 0x55404B5A : 0x33252A33);
             context.fill(panelLeft + 8, rowY, leftPaneRight - 2, rowY + rowHeight, color);
 
             renderPlayerHead(context, profile.ownerId, profile.ownerName, panelLeft + 12, rowY + 3, 16);
@@ -678,10 +665,10 @@ public class MineifyScreen extends Screen {
                 return;
             }
             int backY = contentTop + 28;
-            context.fill(detailsLeft, backY, detailsLeft + 44, backY + 16, 0x33446699);
+            context.fill(detailsLeft, backY, detailsLeft + 44, backY + 16, 0x5A445B88);
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Back"), detailsLeft + 22, backY + 4, 0xFFFFFFFF);
             int queueSelectedX = detailsRight - 76;
-            context.fill(queueSelectedX, backY, queueSelectedX + 72, backY + 16, 0x6633AA33);
+            context.fill(queueSelectedX, backY, queueSelectedX + 72, backY + 16, 0x66408E40);
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Queue Selected"), queueSelectedX + 36, backY + 4, 0xFFFFFFFF);
             int headerTextRight = queueSelectedX - 6;
             int headerTextWidth = Math.max(30, headerTextRight - (detailsLeft + 52));
@@ -696,7 +683,7 @@ public class MineifyScreen extends Screen {
             int py = detailListTop;
             for (int i = playlistDetailScrollOffset; i < detailEnd && py + detailRowHeight <= contentBottom; i++) {
                 ProfileTrackEntry track = opened.tracks.get(i);
-                context.fill(detailsLeft, py, detailsRight - 4, py + 18, 0x33222222);
+                context.fill(detailsLeft, py, detailsRight - 4, py + 18, 0x33252A33);
                 int checkboxX = detailsLeft + 4;
                 boolean selectedTrack = selectedDetailTrackIndexes.contains(i);
                 context.fill(checkboxX, py + 4, checkboxX + 10, py + 14, selectedTrack ? 0x6677CC55 : 0x66333333);
@@ -729,7 +716,7 @@ public class MineifyScreen extends Screen {
         for (int i = profilePlaylistScrollOffset; i < end && py + 18 <= contentBottom; i++) {
             ProfilePlaylistSummary summary = filteredPlaylists.get(i);
             boolean playlistSelected = summary.id.equals(selectedUserPlaylistId);
-            context.fill(detailsLeft, py, detailsRight - 4, py + 18, playlistSelected ? 0x66448844 : 0x33222222);
+            context.fill(detailsLeft, py, detailsRight - 4, py + 18, playlistSelected ? 0x66448A44 : 0x33252A33);
             int likeX = detailsRight - 18;
             context.fill(likeX, py + 2, likeX + 14, py + 16, summary.likedByRequester ? 0x66440000 : 0x66333333);
             context.drawCenteredTextWithShadow(
@@ -760,6 +747,7 @@ public class MineifyScreen extends Screen {
         int listBottom = getListBottom(panelTop);
         int y = listTop;
         int rowHeight = 20;
+        context.fill(panelLeft + LIST_INSET_X, listTop - 2, panelLeft + PANEL_WIDTH - LIST_INSET_X, listBottom, 0x1A000000);
 
         if (recentlyPlayed.isEmpty()) {
             context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("No recently played tracks"), panelLeft + PANEL_WIDTH / 2, listTop + 20, 0xFF888888);
@@ -771,7 +759,7 @@ public class MineifyScreen extends Screen {
         int end = Math.min(recentlyPlayed.size(), recentlyPlayedScrollOffset + maxRows);
         for (int i = recentlyPlayedScrollOffset; i < end && y + rowHeight <= listBottom; i++) {
             RecentlyPlayedEntry entry = recentlyPlayed.get(i);
-            context.fill(panelLeft + 10, y, panelLeft + PANEL_WIDTH - 10, y + rowHeight - 2, 0x22222222);
+            context.fill(panelLeft + LIST_INSET_X, y, panelLeft + PANEL_WIDTH - LIST_INSET_X, y + rowHeight - 2, 0x33252A33);
             String text = truncateText(entry.title + " (" + entry.duration + ")", PANEL_WIDTH - 100);
             context.drawTextWithShadow(this.textRenderer, Text.literal(text), panelLeft + 14, y + 5, 0xFFFFFFFF);
             context.drawTextWithShadow(this.textRenderer, Text.literal(formatTimeAgo(entry.playedAtEpochMs)), panelLeft + PANEL_WIDTH - 88, y + 5, 0xFFAAAAAA);
@@ -1029,7 +1017,8 @@ public class MineifyScreen extends Screen {
     }
 
     private void drawSubtab(DrawContext context, int x, int y, int width, String label, boolean active) {
-        context.fill(x, y, x + width, y + 16, active ? 0x8844AA44 : 0x33444444);
+        context.fill(x, y, x + width, y + 16, active ? 0xAA4B9152 : 0x44323A47);
+        context.drawHorizontalLine(x, x + width - 1, y, active ? 0xFF88C98A : 0xFF6F7887);
         context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(truncateText(label, width - 6)), x + (width / 2), y + 4, 0xFFFFFFFF);
     }
 
@@ -1037,9 +1026,9 @@ public class MineifyScreen extends Screen {
         if (bottom <= top) {
             return;
         }
-        context.fill(x, top, x + 3, bottom, 0x44222222);
+        context.fill(x, top, x + 3, bottom, 0x44313A46);
         if (totalItems <= visibleItems || totalItems <= 0) {
-            context.fill(x, top, x + 3, bottom, 0x66555555);
+            context.fill(x, top, x + 3, bottom, 0x66586575);
             return;
         }
 
@@ -1048,7 +1037,7 @@ public class MineifyScreen extends Screen {
         int maxOffset = Math.max(1, totalItems - visibleItems);
         int maxTravel = Math.max(1, trackHeight - thumbHeight);
         int thumbTop = top + (int) ((scrollOffset / (double) maxOffset) * maxTravel);
-        context.fill(x, thumbTop, x + 3, thumbTop + thumbHeight, 0x99BBBBBB);
+        context.fill(x, thumbTop, x + 3, thumbTop + thumbHeight, 0x99B5C2D1);
     }
 
     private void renderPlayerHead(DrawContext context, String ownerId, String playerName, int x, int y, int size) {
@@ -1361,7 +1350,7 @@ public class MineifyScreen extends Screen {
         return days + "d ago";
     }
 
-    private void renderNowPlaying(DrawContext context, int panelLeft, int y) {
+    private void renderNowPlaying(DrawContext context, int panelLeft, int y, int mouseX, int mouseY) {
         context.fill(panelLeft, y, panelLeft + PANEL_WIDTH, y + NOW_PLAYING_HEIGHT, 0x60000000);
         int contentLeft = panelLeft + 10;
         int controlsLeft = panelLeft + PANEL_WIDTH - CONTROL_SECTION_WIDTH;
@@ -1383,7 +1372,19 @@ public class MineifyScreen extends Screen {
             int barY = y + 24;
             context.fill(barX, barY, barX + barWidth, barY + 4, 0x44FFFFFF);
             context.fill(barX, barY, barX + (int) (barWidth * playbackProgress), barY + 4, playbackPaused ? 0xFFFFAA00 : 0xFF55FF55);
+
+            boolean hoveringBar = mouseX >= barX && mouseX <= barX + barWidth && mouseY >= barY - 1 && mouseY <= barY + 5;
+            if (hoveringBar) {
+                double ratio = Math.max(0.0, Math.min(1.0, (mouseX - barX) / (double) Math.max(1, barWidth)));
+                long hoverMs = (long) (ratio * playbackDurationMs);
+                context.drawTooltip(this.textRenderer, Text.literal(formatTime(hoverMs)), mouseX + 8, mouseY - 8);
+                if (!nowPlayingBarHovered) {
+                    playUiSound(SoundEvents.BLOCK_NOTE_BLOCK_HAT, 0.25f, 1.6f);
+                }
+            }
+            nowPlayingBarHovered = hoveringBar;
         } else {
+            nowPlayingBarHovered = false;
             context.drawTextWithShadow(this.textRenderer, Text.literal("Nothing playing"), contentLeft, y + 12, 0xFF666666);
         }
     }
@@ -1470,6 +1471,10 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseClicked(Click click, boolean doubled) {
+        if (click.button() == 0 && trySeekNowPlaying(click.x(), click.y())) {
+            return true;
+        }
+
         if (showContextMenu) {
             if (click.button() == 0) {
                 if (handleContextMenuLeftClick(click.x(), click.y())) {
@@ -1849,6 +1854,9 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseDragged(Click click, double deltaX, double deltaY) {
+        if (click.button() == 0 && trySeekNowPlaying(click.x(), click.y())) {
+            return true;
+        }
         if (click.button() == 0 && queueDragActive && currentTab == 1) {
             int target = getQueueIndexFromMouse(click.y());
             if (target >= 0) {
@@ -1871,6 +1879,34 @@ public class MineifyScreen extends Screen {
             return true;
         }
         return super.mouseDragged(click, deltaX, deltaY);
+    }
+
+    private boolean trySeekNowPlaying(double mouseX, double mouseY) {
+        if (showPlaylistPicker || showCreatePlaylistDialog || showSpotifyPromptDialog || showSpotifyPreviewDialog) {
+            return false;
+        }
+        if (nowPlaying == null || playbackDurationMs <= 0) {
+            return false;
+        }
+        int panelTop = (this.height / 2) - (PANEL_HEIGHT / 2);
+        int panelLeft = (this.width / 2) - (PANEL_WIDTH / 2);
+        int y = panelTop + PANEL_HEIGHT - (NOW_PLAYING_HEIGHT + VOLUME_HEIGHT + BOTTOM_PADDING);
+        int contentLeft = panelLeft + 10;
+        int controlsLeft = panelLeft + PANEL_WIDTH - CONTROL_SECTION_WIDTH;
+        int contentRight = controlsLeft - 8;
+        int barWidth = Math.max(20, contentRight - contentLeft);
+        int barX = contentLeft;
+        int barY = y + 24;
+
+        if (mouseX < barX || mouseX > barX + barWidth || mouseY < barY - 2 || mouseY > barY + 6) {
+            return false;
+        }
+
+        double ratio = Math.max(0.0, Math.min(1.0, (mouseX - barX) / (double) Math.max(1, barWidth)));
+        long targetMs = (long) (ratio * playbackDurationMs);
+        ClientPlayNetworking.send(new PlaybackControlPacket("seek:" + targetMs));
+        playUiSound(SoundEvents.BLOCK_NOTE_BLOCK_CHIME, 0.45f, 1.15f);
+        return true;
     }
 
     @Override

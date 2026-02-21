@@ -4,6 +4,8 @@ import com.mineify.MineifyClient;
 import com.mineify.MineifyConfig;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.sound.SoundCategory;
 
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioInputStream;
@@ -32,6 +34,9 @@ public class AudioPlayer {
     private volatile boolean pendingPause = false;
     private volatile boolean suppressStopCallback = false;
     private volatile float volume = 0.15f;
+    private volatile boolean minecraftMusicSuppressed = false;
+    private volatile boolean hadPreviousMinecraftMusicVolume = false;
+    private volatile float previousMinecraftMusicVolume = 1.0f;
 
     private AudioPlayer() {}
 
@@ -105,6 +110,7 @@ public class AudioPlayer {
                     paused = true;
                     MineifyClient.LOGGER.info("Loaded '{}' in paused state", title);
                 } else {
+                    suppressMinecraftMusic();
                     clip.start();
                     playing = true;
                     fadeToVolume(clip, volume, MineifyConfig.getPlaybackCrossfadeMs());
@@ -115,6 +121,7 @@ public class AudioPlayer {
                 playing = false;
                 paused = false;
                 currentTitle = "";
+                restoreMinecraftMusic();
             }
         });
     }
@@ -147,12 +154,14 @@ public class AudioPlayer {
             playing = false;
             paused = true;
         }
+        restoreMinecraftMusic();
     }
 
     private void resumeInternal() {
         pendingPause = false;
         Clip clip = currentClip;
         if (clip != null && clip.isOpen() && paused) {
+            suppressMinecraftMusic();
             setClipVolume(clip, 0.0f);
             clip.start();
             fadeToVolume(clip, volume, Math.min(250, MineifyConfig.getPlaybackCrossfadeMs()));
@@ -173,6 +182,7 @@ public class AudioPlayer {
             clip.close();
             currentClip = null;
         }
+        restoreMinecraftMusic();
     }
 
     private void fadeOutAndStopCurrent() {
@@ -259,5 +269,45 @@ public class AudioPlayer {
     public void shutdown() {
         stopInternal();
         executor.shutdownNow();
+    }
+
+    private void suppressMinecraftMusic() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) {
+            return;
+        }
+        client.execute(() -> {
+            if (client.options == null) {
+                return;
+            }
+
+            float currentMusicVolume = (float) client.options.getSoundVolume(SoundCategory.MUSIC);
+            if (!minecraftMusicSuppressed) {
+                previousMinecraftMusicVolume = currentMusicVolume;
+                hadPreviousMinecraftMusicVolume = true;
+                minecraftMusicSuppressed = true;
+            }
+
+            if (currentMusicVolume > 0f) {
+                client.options.getSoundVolumeOption(SoundCategory.MUSIC).setValue(0.0);
+            }
+            client.getSoundManager().stopSounds(null, SoundCategory.MUSIC);
+        });
+    }
+
+    private void restoreMinecraftMusic() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) {
+            minecraftMusicSuppressed = false;
+            hadPreviousMinecraftMusicVolume = false;
+            return;
+        }
+        client.execute(() -> {
+            if (client.options != null && minecraftMusicSuppressed && hadPreviousMinecraftMusicVolume) {
+                client.options.getSoundVolumeOption(SoundCategory.MUSIC).setValue((double) previousMinecraftMusicVolume);
+            }
+            minecraftMusicSuppressed = false;
+            hadPreviousMinecraftMusicVolume = false;
+        });
     }
 }

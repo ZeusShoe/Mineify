@@ -255,8 +255,53 @@ public class PlaylistManager {
                     player.sendMessage(net.minecraft.text.Text.literal("Nothing to undo."), false);
                 }
             }
-            default -> Mineify.LOGGER.warn("Unknown playback action '{}'", action);
+            default -> {
+                if (action.toLowerCase().startsWith("seek:")) {
+                    if (!isPlaying || currentIndex < 0 || currentIndex >= playlist.size()) {
+                        return;
+                    }
+                    if (moderatorOnly && !isModerator) {
+                        player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to seek playback."), false);
+                        return;
+                    }
+                    try {
+                        long requestedMs = Long.parseLong(action.substring("seek:".length()));
+                        seekPlaybackTo(requestedMs);
+                    } catch (NumberFormatException ignored) {
+                        Mineify.LOGGER.warn("Invalid seek payload '{}'", action);
+                    }
+                    return;
+                }
+                Mineify.LOGGER.warn("Unknown playback action '{}'", action);
+            }
         }
+    }
+
+    private void seekPlaybackTo(long requestedMs) {
+        if (!isPlaying || currentIndex < 0 || currentIndex >= playlist.size()) {
+            return;
+        }
+        long clampedMs = Math.max(0, Math.min(requestedMs, Math.max(0, currentTrackDurationMs)));
+        if (paused) {
+            pausedElapsedMs = clampedMs;
+        } else {
+            playbackStartNanos = System.nanoTime() - (clampedMs * 1_000_000L);
+        }
+
+        PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
+        if (currentDownloadUrl != null) {
+            PlayAudioPacket seekPacket = new PlayAudioPacket(
+                    currentDownloadUrl,
+                    entry.title(),
+                    entry.videoId(),
+                    clampedMs
+            );
+            for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+                ServerPlayNetworking.send(p, seekPacket);
+            }
+        }
+        broadcastNowPlaying(entry.title(), clampedMs);
+        scheduleAdvanceFromCurrentState();
     }
 
     public void handleQueueReorder(ServerPlayerEntity player, int fromIndex, int toIndex) {
