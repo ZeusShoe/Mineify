@@ -56,8 +56,9 @@ public class CompanionClient {
                 });
     }
 
-    public CompletableFuture<SpotifyPlaylist> getSpotifyPlaylistTracks(String spotifyUrl) {
-        String url = baseUrl + "/api/spotify/playlist?url=" + java.net.URLEncoder.encode(spotifyUrl, java.nio.charset.StandardCharsets.UTF_8);
+    public CompletableFuture<SpotifyPlaylist> getSpotifyPlaylistTracks(String spotifyUrl, String playerId) {
+        String url = baseUrl + "/api/spotify/playlist?url=" + java.net.URLEncoder.encode(spotifyUrl, java.nio.charset.StandardCharsets.UTF_8)
+                + "&playerId=" + java.net.URLEncoder.encode(playerId, java.nio.charset.StandardCharsets.UTF_8);
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .GET()
@@ -67,21 +68,30 @@ public class CompanionClient {
                 .thenApply(response -> {
                     List<SpotifyTrack> tracks = new ArrayList<>();
                     try {
-                        if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                            Mineify.LOGGER.error("Spotify playlist request failed: status={}, body={}", response.statusCode(), response.body());
-                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks);
-                        }
                         JsonObject obj = gson.fromJson(response.body(), JsonObject.class);
+                        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                            String error = obj != null && obj.has("error") ? obj.get("error").getAsString() : ("HTTP " + response.statusCode());
+                            boolean authRequired = obj != null && obj.has("authRequired") && obj.get("authRequired").getAsBoolean();
+                            String authUrl = obj != null && obj.has("authUrl") ? obj.get("authUrl").getAsString() : "";
+                            Mineify.LOGGER.error("Spotify playlist request failed: status={}, body={}", response.statusCode(), response.body());
+                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks, error, authRequired, authUrl);
+                        }
                         if (obj != null && obj.has("error") && !obj.get("error").isJsonNull()) {
-                            Mineify.LOGGER.error("Spotify playlist response error: {}", obj.get("error").getAsString());
-                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks);
+                            String error = obj.get("error").getAsString();
+                            boolean authRequired = obj.has("authRequired") && obj.get("authRequired").getAsBoolean();
+                            String authUrl = obj.has("authUrl") ? obj.get("authUrl").getAsString() : "";
+                            Mineify.LOGGER.error("Spotify playlist response error: {}", error);
+                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks, error, authRequired, authUrl);
+                        }
+                        if (obj == null) {
+                            return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks, "Empty Spotify response", false, "");
                         }
                         String playlistId = obj.has("playlistId") ? obj.get("playlistId").getAsString() : "";
                         String playlistName = obj.has("playlistName") ? obj.get("playlistName").getAsString() : "Imported Playlist";
                         String ownerName = obj.has("ownerDisplayName") ? obj.get("ownerDisplayName").getAsString() : "Spotify User";
                         JsonArray arr = obj.getAsJsonArray("tracks");
                         if (arr == null) {
-                            return new SpotifyPlaylist(playlistId, playlistName, ownerName, tracks);
+                            return new SpotifyPlaylist(playlistId, playlistName, ownerName, tracks, "", false, "");
                         }
                         for (var el : arr) {
                             JsonObject trackObj = el.getAsJsonObject();
@@ -93,16 +103,20 @@ public class CompanionClient {
                                     trackObj.has("duration") ? trackObj.get("duration").getAsString() : ""
                             ));
                         }
-                        return new SpotifyPlaylist(playlistId, playlistName, ownerName, tracks);
+                        return new SpotifyPlaylist(playlistId, playlistName, ownerName, tracks, "", false, "");
                     } catch (Exception e) {
                         Mineify.LOGGER.error("Failed to parse Spotify playlist response", e);
-                        return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks);
+                        return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", tracks, "Failed to parse Spotify response", false, "");
                     }
                 })
                 .exceptionally(e -> {
                     Mineify.LOGGER.error("Spotify playlist fetch failed", e);
-                    return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", new ArrayList<>());
+                    return new SpotifyPlaylist("", "Imported Playlist", "Spotify User", new ArrayList<>(), "Spotify fetch failed", false, "");
                 });
+    }
+
+    public String getSpotifyAuthStartUrl(String playerId) {
+        return baseUrl + "/api/spotify/auth/start?playerId=" + java.net.URLEncoder.encode(playerId, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**
@@ -163,5 +177,13 @@ public class CompanionClient {
 
     public record SearchResult(String videoId, String title, String channel, String duration, String thumbnail) {}
     public record SpotifyTrack(String spotifyTrackId, String title, String artist, String query, String duration) {}
-    public record SpotifyPlaylist(String playlistId, String playlistName, String ownerDisplayName, List<SpotifyTrack> tracks) {}
+    public record SpotifyPlaylist(
+            String playlistId,
+            String playlistName,
+            String ownerDisplayName,
+            List<SpotifyTrack> tracks,
+            String error,
+            boolean authRequired,
+            String authUrl
+    ) {}
 }

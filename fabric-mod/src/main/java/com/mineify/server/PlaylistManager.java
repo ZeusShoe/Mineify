@@ -17,6 +17,10 @@ import com.mineify.network.packets.SpotifyImportFinishedPacket;
 import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
+import net.minecraft.text.ClickEvent;
+import net.minecraft.text.Style;
+import net.minecraft.text.Text;
+import net.minecraft.util.Formatting;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 
@@ -24,6 +28,7 @@ import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
 import java.lang.reflect.Type;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -400,10 +405,17 @@ public class PlaylistManager {
         String playerId = player.getUuidAsString();
         spotifyImportSessions.remove(playerId);
 
-        companionClient.getSpotifyPlaylistTracks(spotifyUrl).thenAccept(playlistData -> {
+        companionClient.getSpotifyPlaylistTracks(spotifyUrl, playerId).thenAccept(playlistData -> {
             server.execute(() -> {
+                if (playlistData.authRequired()) {
+                    sendSpotifyAuthPrompt(player, playlistData.authUrl(), playlistData.error());
+                    return;
+                }
                 if (playlistData.tracks().isEmpty()) {
-                    player.sendMessage(net.minecraft.text.Text.literal("Spotify import failed: no tracks found."), false);
+                    String reason = playlistData.error() == null || playlistData.error().isBlank()
+                            ? "Spotify import failed: no tracks found."
+                            : "Spotify import failed: " + playlistData.error();
+                    player.sendMessage(Text.literal(reason), false);
                     return;
                 }
 
@@ -432,10 +444,17 @@ public class PlaylistManager {
         String playerId = player.getUuidAsString();
         spotifyImportPreviewSessions.remove(playerId);
 
-        companionClient.getSpotifyPlaylistTracks(spotifyUrl).thenAccept(playlistData -> {
+        companionClient.getSpotifyPlaylistTracks(spotifyUrl, playerId).thenAccept(playlistData -> {
             server.execute(() -> {
+                if (playlistData.authRequired()) {
+                    sendSpotifyAuthPrompt(player, playlistData.authUrl(), playlistData.error());
+                    return;
+                }
                 if (playlistData.tracks().isEmpty()) {
-                    player.sendMessage(net.minecraft.text.Text.literal("Spotify import failed: no tracks found."), false);
+                    String reason = playlistData.error() == null || playlistData.error().isBlank()
+                            ? "Spotify import failed: no tracks found."
+                            : "Spotify import failed: " + playlistData.error();
+                    player.sendMessage(Text.literal(reason), false);
                     return;
                 }
 
@@ -475,6 +494,23 @@ public class PlaylistManager {
                 ));
             });
         });
+    }
+
+    private void sendSpotifyAuthPrompt(ServerPlayerEntity player, String authUrl, String reason) {
+        String link = (authUrl == null || authUrl.isBlank())
+                ? companionClient.getSpotifyAuthStartUrl(player.getUuidAsString())
+                : authUrl;
+        player.sendMessage(Text.literal("Spotify needs authorization before importing playlists."), false);
+        if (reason != null && !reason.isBlank()) {
+            player.sendMessage(Text.literal("Reason: " + reason), false);
+        }
+        Text clickable = Text.literal("[Connect Spotify]")
+                .setStyle(Style.EMPTY
+                        .withColor(Formatting.AQUA)
+                        .withUnderline(true)
+                        .withClickEvent(new ClickEvent.OpenUrl(URI.create(link))));
+        player.sendMessage(clickable, false);
+        player.sendMessage(Text.literal("Click the link, sign in, then retry the import."), false);
     }
 
     public void handleConfirmSpotifyImport(
