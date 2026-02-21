@@ -9,7 +9,24 @@ function extractPlaylistId(spotifyUrl) {
         return uriMatch[1];
     }
 
-    const webMatch = url.match(/spotify\.com\/playlist\/([a-zA-Z0-9]+)/);
+    try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        if (host === 'open.spotify.com' || host === 'play.spotify.com') {
+            const segments = parsed.pathname.split('/').filter(Boolean);
+            const playlistIndex = segments.indexOf('playlist');
+            if (playlistIndex >= 0 && playlistIndex + 1 < segments.length) {
+                const candidate = segments[playlistIndex + 1];
+                if (/^[a-zA-Z0-9]+$/.test(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+    } catch (_) {
+        // Fallback to regex for non-URL strings.
+    }
+
+    const webMatch = url.match(/spotify\.com\/(?:intl-[^/]+\/)?playlist\/([a-zA-Z0-9]+)/i);
     if (webMatch) {
         return webMatch[1];
     }
@@ -49,12 +66,14 @@ async function fetchPlaylistTracksPage(playlistId, accessToken, offset) {
     const endpoint = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100&offset=${offset}`;
     const response = await fetch(endpoint, {
         headers: {
-            Authorization: `Bearer ${accessToken}`
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json'
         }
     });
 
     if (!response.ok) {
-        throw new Error(`Spotify playlist request failed with status ${response.status}`);
+        const body = await response.text();
+        throw new Error(`Spotify playlist request failed with status ${response.status}: ${body}`);
     }
     return response.json();
 }
@@ -63,11 +82,13 @@ async function fetchPlaylistMetadata(playlistId, accessToken) {
     const endpoint = `https://api.spotify.com/v1/playlists/${playlistId}`;
     const response = await fetch(endpoint, {
         headers: {
-            Authorization: `Bearer ${accessToken}`
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json'
         }
     });
     if (!response.ok) {
-        throw new Error(`Spotify playlist metadata request failed with status ${response.status}`);
+        const body = await response.text();
+        throw new Error(`Spotify playlist metadata request failed with status ${response.status}: ${body}`);
     }
     return response.json();
 }
