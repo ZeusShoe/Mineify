@@ -15,8 +15,13 @@ public class MineifyConfig {
     private static int playbackProgressBroadcastIntervalMs = 1000;
     private static int playbackCrossfadeMs = 180;
     private static int playbackPreloadBufferMs = 1000;
+    private static int playbackPrefetchCount = 2;
     private static int queueUndoMaxHistory = 20;
     private static boolean moderationRequireOpForGlobalQueueControls = true;
+    private static boolean queueVotingEnabled = false;
+    private static int queueVotingMinVotes = 2;
+    private static double queueVotingThreshold = 0.6d;
+    private static boolean announcementsNowPlayingChatCards = true;
     private static boolean uiCompactDefault = false;
     private static boolean recentlyPlayedEnabled = true;
     private static int recentlyPlayedMaxEntries = 200;
@@ -74,8 +79,20 @@ public class MineifyConfig {
                     if (playbackObj.has("queueUndoMaxHistory")) {
                         queueUndoMaxHistory = Math.max(1, playbackObj.get("queueUndoMaxHistory").getAsInt());
                     }
+                    if (playbackObj.has("prefetchCount")) {
+                        playbackPrefetchCount = Math.max(0, playbackObj.get("prefetchCount").getAsInt());
+                    }
                     if (playbackObj.has("moderationRequireOpForGlobalQueueControls")) {
                         moderationRequireOpForGlobalQueueControls = playbackObj.get("moderationRequireOpForGlobalQueueControls").getAsBoolean();
+                    }
+                    if (playbackObj.has("queueVotingEnabled")) {
+                        queueVotingEnabled = playbackObj.get("queueVotingEnabled").getAsBoolean();
+                    }
+                    if (playbackObj.has("queueVotingMinVotes")) {
+                        queueVotingMinVotes = Math.max(1, playbackObj.get("queueVotingMinVotes").getAsInt());
+                    }
+                    if (playbackObj.has("queueVotingThreshold")) {
+                        queueVotingThreshold = Math.max(0.1d, Math.min(1.0d, playbackObj.get("queueVotingThreshold").getAsDouble()));
                     }
                 }
 
@@ -151,6 +168,13 @@ public class MineifyConfig {
                     permissionsEnabled = permissionsObj.get("enabled").getAsBoolean();
                 }
 
+                JsonObject announcementsObj = obj.has("announcements") && obj.get("announcements").isJsonObject()
+                        ? obj.getAsJsonObject("announcements")
+                        : null;
+                if (announcementsObj != null && announcementsObj.has("nowPlayingChatCards")) {
+                    announcementsNowPlayingChatCards = announcementsObj.get("nowPlayingChatCards").getAsBoolean();
+                }
+
                 JsonObject uiObj = obj.has("ui") && obj.get("ui").isJsonObject()
                         ? obj.getAsJsonObject("ui")
                         : null;
@@ -191,12 +215,28 @@ public class MineifyConfig {
         return playbackPreloadBufferMs;
     }
 
+    public static int getPlaybackPrefetchCount() {
+        return playbackPrefetchCount;
+    }
+
     public static int getQueueUndoMaxHistory() {
         return queueUndoMaxHistory;
     }
 
     public static boolean isModerationRequireOpForGlobalQueueControls() {
         return moderationRequireOpForGlobalQueueControls;
+    }
+
+    public static boolean isQueueVotingEnabled() {
+        return queueVotingEnabled;
+    }
+
+    public static int getQueueVotingMinVotes() {
+        return queueVotingMinVotes;
+    }
+
+    public static double getQueueVotingThreshold() {
+        return queueVotingThreshold;
     }
 
     public static boolean isUiCompactDefault() {
@@ -265,5 +305,9 @@ public class MineifyConfig {
 
     public static boolean isPermissionsEnabled() {
         return permissionsEnabled;
+    }
+
+    public static boolean isNowPlayingChatCardsEnabled() {
+        return announcementsNowPlayingChatCards;
     }
 }

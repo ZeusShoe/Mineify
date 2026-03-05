@@ -13,7 +13,13 @@ import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.Clip;
 import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.LineEvent;
+import java.io.BufferedInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -41,8 +47,11 @@ public class AudioPlayer {
     private volatile boolean minecraftMusicSuppressed = false;
     private volatile boolean hadPreviousMinecraftMusicVolume = false;
     private volatile float previousMinecraftMusicVolume = 1.0f;
+    private static final Path CLIENT_VOLUME_FILE = Path.of("config", "mineify-client.properties");
 
-    private AudioPlayer() {}
+    private AudioPlayer() {
+        this.volume = loadStoredVolume();
+    }
 
     public static AudioPlayer getInstance() {
         if (instance == null) {
@@ -70,25 +79,30 @@ public class AudioPlayer {
                     }
                     MineifyClient.LOGGER.info("Downloading audio from: {} (attempt {}/{})", requestUrl, attempt, MAX_LOAD_ATTEMPTS);
                     URL url = new URL(requestUrl);
-                    AudioInputStream ais = AudioSystem.getAudioInputStream(url);
-
-                    AudioFormat baseFormat = ais.getFormat();
-                    AudioFormat playFormat = new AudioFormat(
-                            AudioFormat.Encoding.PCM_SIGNED,
-                            baseFormat.getSampleRate(),
-                            16,
-                            baseFormat.getChannels(),
-                            baseFormat.getChannels() * 2,
-                            baseFormat.getSampleRate(),
-                            false
-                    );
-
-                    if (!baseFormat.matches(playFormat)) {
-                        ais = AudioSystem.getAudioInputStream(playFormat, ais);
-                    }
-
                     Clip clip = AudioSystem.getClip();
-                    clip.open(ais);
+                    try (InputStream raw = url.openStream();
+                         BufferedInputStream buffered = new BufferedInputStream(raw);
+                         AudioInputStream sourceAis = AudioSystem.getAudioInputStream(buffered)) {
+
+                        AudioFormat baseFormat = sourceAis.getFormat();
+                        AudioFormat playFormat = new AudioFormat(
+                                AudioFormat.Encoding.PCM_SIGNED,
+                                baseFormat.getSampleRate(),
+                                16,
+                                baseFormat.getChannels(),
+                                baseFormat.getChannels() * 2,
+                                baseFormat.getSampleRate(),
+                                false
+                        );
+
+                        if (!baseFormat.matches(playFormat)) {
+                            try (AudioInputStream convertedAis = AudioSystem.getAudioInputStream(playFormat, sourceAis)) {
+                                clip.open(convertedAis);
+                            }
+                        } else {
+                            clip.open(sourceAis);
+                        }
+                    }
                     clip.addLineListener(event -> {
                         if (event.getType() == LineEvent.Type.STOP && playing) {
                             if (suppressStopCallback) {
@@ -109,7 +123,11 @@ public class AudioPlayer {
                     paused = false;
                     setClipVolume(clip, 0.0f);
                     if (onLoaded != null) {
-                        onLoaded.run();
+                        try {
+                            onLoaded.run();
+                        } catch (Exception callbackError) {
+                            MineifyClient.LOGGER.warn("onLoaded callback failed: {}", callbackError.toString());
+                        }
                     }
 
                     long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
@@ -215,8 +233,11 @@ public class AudioPlayer {
     }
 
     private long calculateStartOffsetMs(long serverElapsedMs, long scheduledStartNanos) {
-        long lateMs = Math.max(0L, (System.nanoTime() - scheduledStartNanos) / 1_000_000L);
-        return Math.max(0, serverElapsedMs) + lateMs;
+        // Never include local download/decode time in playback offset.
+        // Only compensate a tiny amount for packet transit/scheduling jitter.
+        long jitterMs = Math.max(0L, (System.nanoTime() - scheduledStartNanos) / 1_000_000L);
+        long boundedJitterMs = Math.min(200L, jitterMs);
+        return Math.max(0, serverElapsedMs) + boundedJitterMs;
     }
 
     private void waitForScheduledStart(long scheduledStartNanos) {
@@ -306,7 +327,8 @@ public class AudioPlayer {
     }
 
     public void setVolume(float volume) {
-        this.volume = volume;
+        this.volume = Math.max(0.0f, Math.min(1.0f, volume));
+        saveStoredVolume(this.volume);
         Clip clip = currentClip;
         if (clip != null && clip.isOpen()) {
             applyVolume(clip);
@@ -397,5 +419,32 @@ public class AudioPlayer {
             minecraftMusicSuppressed = false;
             hadPreviousMinecraftMusicVolume = false;
         });
+    }
+
+    private float loadStoredVolume() {
+        if (!Files.exists(CLIENT_VOLUME_FILE)) {
+            return 0.15f;
+        }
+        Properties props = new Properties();
+        try (var in = Files.newInputStream(CLIENT_VOLUME_FILE)) {
+            props.load(in);
+            String raw = props.getProperty("volume", "0.15");
+            float parsed = Float.parseFloat(raw);
+            return Math.max(0.0f, Math.min(1.0f, parsed));
+        } catch (IOException | NumberFormatException ignored) {
+            return 0.15f;
+        }
+    }
+
+    private void saveStoredVolume(float value) {
+        Properties props = new Properties();
+        props.setProperty("volume", Float.toString(value));
+        try {
+            Files.createDirectories(CLIENT_VOLUME_FILE.getParent());
+            try (var out = Files.newOutputStream(CLIENT_VOLUME_FILE)) {
+                props.store(out, "Mineify client settings");
+            }
+        } catch (IOException ignored) {
+        }
     }
 }

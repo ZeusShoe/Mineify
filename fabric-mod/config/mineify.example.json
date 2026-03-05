@@ -7,8 +7,12 @@
     "progressBroadcastIntervalMs": 1000,
     "crossfadeMs": 180,
     "preloadBufferMs": 1000,
+    "prefetchCount": 2,
     "queueUndoMaxHistory": 20,
-    "moderationRequireOpForGlobalQueueControls": true
+    "moderationRequireOpForGlobalQueueControls": true,
+    "queueVotingEnabled": false,
+    "queueVotingMinVotes": 2,
+    "queueVotingThreshold": 0.6
   },
   "recentlyPlayed": {
     "enabled": true,
@@ -33,5 +37,11 @@
   },
   "permissions": {
     "enabled": false
+  },
+  "announcements": {
+    "nowPlayingChatCards": true
+  },
+  "ui": {
+    "compactDefault": false
   }
 }

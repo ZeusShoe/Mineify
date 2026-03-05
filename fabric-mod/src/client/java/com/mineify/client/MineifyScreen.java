@@ -75,6 +75,7 @@ public class MineifyScreen extends Screen {
     private TextFieldWidget searchField;
     private ButtonWidget searchButton;
     private ButtonWidget pauseResumeButton;
+    private ButtonWidget replayButton;
     private ButtonWidget skipButton;
     private ButtonWidget undoQueueButton;
     private ButtonWidget clearQueueButton;
@@ -214,12 +215,17 @@ public class MineifyScreen extends Screen {
 
         this.pauseResumeButton = ButtonWidget.builder(Text.literal("⏸"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket(playbackPaused ? "resume" : "pause"));
-        }).dimensions(controlsLeft + 8, controlButtonY, 42, 18).build();
+        }).dimensions(controlsLeft + 6, controlButtonY, 32, 18).build();
         this.addDrawableChild(this.pauseResumeButton);
+        this.replayButton = ButtonWidget.builder(Text.literal("↺"), button -> {
+            ClientPlayNetworking.send(new PlaybackControlPacket("replay"));
+        }).dimensions(controlsLeft + 40, controlButtonY, 28, 18).build();
+        this.addDrawableChild(this.replayButton);
+
 
         this.skipButton = ButtonWidget.builder(Text.literal("⏭"), button -> {
             ClientPlayNetworking.send(new PlaybackControlPacket("skip"));
-        }).dimensions(controlsLeft + 54, controlButtonY, 48, 18).build();
+        }).dimensions(controlsLeft + 72, controlButtonY, 40, 18).build();
         this.addDrawableChild(this.skipButton);
 
         this.undoQueueButton = ButtonWidget.builder(Text.literal("Undo"), button -> {
@@ -2521,6 +2527,9 @@ public class MineifyScreen extends Screen {
             pauseResumeButton.active = hasTrack;
             pauseResumeButton.setMessage(Text.literal(playbackPaused ? "▶" : "⏸"));
         }
+        if (replayButton != null) {
+            replayButton.active = hasTrack;
+        }
         if (skipButton != null) {
             skipButton.active = hasTrack;
         }
@@ -2900,3 +2909,6 @@ public class MineifyScreen extends Screen {
         }
     }
 }
+
+
+

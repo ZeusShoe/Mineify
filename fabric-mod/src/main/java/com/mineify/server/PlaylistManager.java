@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.Deque;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
@@ -99,6 +100,9 @@ public class PlaylistManager {
     private long waitingReadyNonce = -1L;
     private String waitingReadyVideoId = null;
     private final java.util.Set<String> waitingReadyPlayers = new java.util.HashSet<>();
+    private final Set<String> skipVotes = new java.util.HashSet<>();
+    private final Set<String> replayVotes = new java.util.HashSet<>();
+    private final Set<String> prefetchInFlight = ConcurrentHashMap.newKeySet();
     private ScheduledFuture<?> waitingReadyTimeoutFuture;
     private ScheduledFuture<?> advanceFuture;
     private ScheduledFuture<?> progressFuture;
@@ -212,6 +216,7 @@ public class PlaylistManager {
         );
         playlist.add(entry);
         syncToAll();
+        prefetchUpcomingTracks();
 
         if (!isPlaying) {
             playNext();
@@ -255,6 +260,7 @@ public class PlaylistManager {
         }
 
         syncToAll();
+        prefetchUpcomingTracks();
     }
 
     public void handlePlaybackControl(ServerPlayerEntity player, String action) {
@@ -279,12 +285,27 @@ public class PlaylistManager {
                     player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to skip tracks."), false);
                     return;
                 }
-                Mineify.LOGGER.info("Player {} requested skip", player.getName().getString());
-                if (isPlaying) {
-                    if (advanceFuture != null) {
-                        advanceFuture.cancel(false);
+                if (MineifyConfig.isQueueVotingEnabled()) {
+                    handleVoteSkip(player);
+                } else {
+                    Mineify.LOGGER.info("Player {} requested skip", player.getName().getString());
+                    if (isPlaying) {
+                        if (advanceFuture != null) {
+                            advanceFuture.cancel(false);
+                        }
+                        advanceAfterTrackEnd();
                     }
-                    advanceAfterTrackEnd();
+                }
+            }
+            case "replay" -> {
+                if (!hasPerm(player, PERM_PLAYBACK_SEEK, legacyPlaybackAllowed)) {
+                    player.sendMessage(Text.literal("You need permissions to replay track."), false);
+                    return;
+                }
+                if (MineifyConfig.isQueueVotingEnabled()) {
+                    handleVoteReplay(player);
+                } else if (isPlaying) {
+                    seekPlaybackTo(0L);
                 }
             }
             case "pause" -> {
@@ -765,7 +786,7 @@ public class PlaylistManager {
                 trimmedName,
                 isPublic
         );
-        if (addInitialTrack && videoId != null && !videoId.isBlank()) {
+        if (addInitialTrack && videoId != null && !videoId.isBlank() && parseDuration(duration) <= MAX_TRACK_DURATION_MS) {
             playlistModel.tracks.add(new UserPlaylistTrack(videoId, title, duration));
         }
         userPlaylists.add(playlistModel);
@@ -827,6 +848,7 @@ public class PlaylistManager {
     private void playNext() {
         playbackRequestNonce++;
         clearClientReadyWait();
+        clearVotes();
         long requestNonce = playbackRequestNonce;
         currentIndex++;
         if (currentIndex >= playlist.size()) {
@@ -882,6 +904,10 @@ public class PlaylistManager {
                 for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
                     waitingReadyPlayers.add(p.getUuidAsString());
                 }
+                // Hold clients in paused state while they load; start all together on ready.
+                paused = true;
+                pausedElapsedMs = 0;
+                broadcastPlaybackState(true);
                 for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
                     ServerPlayNetworking.send(p, packet);
                 }
@@ -890,6 +916,7 @@ public class PlaylistManager {
                     startCurrentTrackPlayback(entry);
                     return;
                 }
+                prefetchUpcomingTracks();
 
                 waitingReadyTimeoutFuture = scheduler.schedule(
                         () -> server.execute(() -> {
@@ -929,11 +956,18 @@ public class PlaylistManager {
 
     private void startCurrentTrackPlayback(PlaylistSyncPacket.Entry entry) {
         clearClientReadyWait();
+        clearVotes();
         playbackStartNanos = System.nanoTime();
+        paused = false;
+        pausedElapsedMs = 0;
         recordRecentlyPlayed(entry);
+        if (MineifyConfig.isNowPlayingChatCardsEnabled()) {
+            broadcastNowPlayingCard(entry);
+        }
         broadcastPlaybackState(false);
         broadcastNowPlaying(entry.title(), 0L);
         scheduleAdvanceFromCurrentState();
+        prefetchUpcomingTracks();
     }
 
     private void clearClientReadyWait() {
@@ -943,6 +977,78 @@ public class PlaylistManager {
         if (waitingReadyTimeoutFuture != null) {
             waitingReadyTimeoutFuture.cancel(false);
             waitingReadyTimeoutFuture = null;
+        }
+    }
+
+    private void handleVoteSkip(ServerPlayerEntity player) {
+        if (!isPlaying || currentIndex < 0 || currentIndex >= playlist.size()) {
+            return;
+        }
+        String id = player.getUuidAsString();
+        if (!skipVotes.add(id)) {
+            player.sendMessage(Text.literal("You already voted to skip this track."), false);
+            return;
+        }
+        int required = requiredVotes();
+        broadcastSystemMessage(Text.literal(player.getName().getString() + " voted skip (" + skipVotes.size() + "/" + required + ")"));
+        if (skipVotes.size() >= required) {
+            skipVotes.clear();
+            replayVotes.clear();
+            if (advanceFuture != null) {
+                advanceFuture.cancel(false);
+            }
+            advanceAfterTrackEnd();
+        }
+    }
+
+    private void handleVoteReplay(ServerPlayerEntity player) {
+        if (!isPlaying || currentIndex < 0 || currentIndex >= playlist.size()) {
+            return;
+        }
+        String id = player.getUuidAsString();
+        if (!replayVotes.add(id)) {
+            player.sendMessage(Text.literal("You already voted to replay this track."), false);
+            return;
+        }
+        int required = requiredVotes();
+        broadcastSystemMessage(Text.literal(player.getName().getString() + " voted replay (" + replayVotes.size() + "/" + required + ")"));
+        if (replayVotes.size() >= required) {
+            replayVotes.clear();
+            skipVotes.clear();
+            seekPlaybackTo(0L);
+        }
+    }
+
+    private int requiredVotes() {
+        int online = Math.max(1, server.getPlayerManager().getPlayerList().size());
+        int byThreshold = (int) Math.ceil(online * MineifyConfig.getQueueVotingThreshold());
+        return Math.max(1, Math.max(MineifyConfig.getQueueVotingMinVotes(), byThreshold));
+    }
+
+    private void clearVotes() {
+        skipVotes.clear();
+        replayVotes.clear();
+    }
+
+    private void broadcastSystemMessage(Text text) {
+        for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+            p.sendMessage(text, false);
+        }
+    }
+
+    private void prefetchUpcomingTracks() {
+        int count = Math.max(0, MineifyConfig.getPlaybackPrefetchCount());
+        if (count <= 0 || playlist.isEmpty()) {
+            return;
+        }
+        int start = Math.max(0, currentIndex + 1);
+        int end = Math.min(playlist.size(), start + count);
+        for (int i = start; i < end; i++) {
+            String videoId = playlist.get(i).videoId();
+            if (!prefetchInFlight.add(videoId)) {
+                continue;
+            }
+            companionClient.requestDownload(videoId).whenComplete((url, err) -> prefetchInFlight.remove(videoId));
         }
     }
 
@@ -1030,6 +1136,17 @@ public class PlaylistManager {
         PlaybackStatePacket packet = new PlaybackStatePacket(pausedValue);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, packet);
+        }
+    }
+
+    private void broadcastNowPlayingCard(PlaylistSyncPacket.Entry entry) {
+        String title = blankToFallback(entry.title(), "Unknown Track");
+        String addedBy = blankToFallback(entry.addedBy(), "Unknown");
+        Text line = Text.literal("♪ Now playing: ").formatted(Formatting.GREEN)
+                .append(Text.literal(title).formatted(Formatting.WHITE))
+                .append(Text.literal("  •  added by " + addedBy).formatted(Formatting.GRAY));
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            player.sendMessage(line, false);
         }
     }
 
@@ -1229,6 +1346,9 @@ public class PlaylistManager {
     private boolean addTrackToUserPlaylistInternal(String ownerId, String playlistId, String videoId, String title, String duration) {
         UserPlaylist playlistModel = findUserPlaylist(ownerId, playlistId);
         if (playlistModel == null) {
+            return false;
+        }
+        if (parseDuration(duration) > MAX_TRACK_DURATION_MS) {
             return false;
         }
         if (playlistModel.tracks.size() >= MineifyConfig.getPlaylistsMaxTracksPerPlaylist()) {
@@ -1569,6 +1689,7 @@ public class PlaylistManager {
         pushQueueUndoSnapshot("clear");
         playbackRequestNonce++;
         clearClientReadyWait();
+        clearVotes();
         playlist.clear();
         cancelAdvanceSchedule();
         isPlaying = false;

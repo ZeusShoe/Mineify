@@ -312,7 +312,9 @@ public class MineifyClient implements ClientModInitializer {
                         payload.serverElapsedMs(),
                         packetReceivedAtNanos,
                         payload.scheduledDelayMs(),
-                        () -> ClientPlayNetworking.send(new com.mineify.network.packets.PlaybackControlPacket("ready:" + payload.videoId()))
+                        () -> MinecraftClient.getInstance().execute(() ->
+                                ClientPlayNetworking.send(new com.mineify.network.packets.PlaybackControlPacket("ready:" + payload.videoId()))
+                        )
                 );
             });
         });
