@@ -138,6 +138,8 @@ public class MineifyScreen extends Screen {
     private int contextMenuY = 0;
     private ContextMenuState contextMenuState = null;
     private boolean nowPlayingBarHovered = false;
+    private boolean nowPlayingSeekActive = false;
+    private long nowPlayingPendingSeekMs = -1L;
     private boolean showClearQueueConfirm = false;
     private ActiveScrollbar activeScrollbar = ActiveScrollbar.NONE;
     private int activeScrollbarTop = 0;
@@ -1688,7 +1690,7 @@ public class MineifyScreen extends Screen {
             return super.mouseClicked(click, doubled);
         }
 
-        if (click.button() == 0 && trySeekNowPlaying(click.x(), click.y())) {
+        if (click.button() == 0 && beginOrUpdateSeekTarget(click.x(), click.y())) {
             return true;
         }
         if (click.button() == 0 && tryBeginScrollbarDrag(click.x(), click.y())) {
@@ -2072,8 +2074,10 @@ public class MineifyScreen extends Screen {
 
     @Override
     public boolean mouseDragged(Click click, double deltaX, double deltaY) {
-        if (click.button() == 0 && trySeekNowPlaying(click.x(), click.y())) {
-            return true;
+        if (click.button() == 0 && nowPlayingSeekActive) {
+            if (beginOrUpdateSeekTarget(click.x(), click.y())) {
+                return true;
+            }
         }
         if (click.button() == 0 && activeScrollbar != ActiveScrollbar.NONE) {
             updateScrollbarOffsetFromMouse(click.y());
@@ -2103,12 +2107,22 @@ public class MineifyScreen extends Screen {
         return super.mouseDragged(click, deltaX, deltaY);
     }
 
-    private boolean trySeekNowPlaying(double mouseX, double mouseY) {
-        if (showPlaylistPicker || showCreatePlaylistDialog || showSpotifyPromptDialog || showSpotifyPreviewDialog) {
+    private boolean beginOrUpdateSeekTarget(double mouseX, double mouseY) {
+        Long targetMs = getSeekTargetMs(mouseX, mouseY);
+        if (targetMs == null) {
             return false;
         }
+        nowPlayingSeekActive = true;
+        nowPlayingPendingSeekMs = targetMs;
+        return true;
+    }
+
+    private Long getSeekTargetMs(double mouseX, double mouseY) {
+        if (showPlaylistPicker || showCreatePlaylistDialog || showSpotifyPromptDialog || showSpotifyPreviewDialog) {
+            return null;
+        }
         if (nowPlaying == null || playbackDurationMs <= 0) {
-            return false;
+            return null;
         }
         int panelTop = (this.height / 2) - (PANEL_HEIGHT / 2);
         int panelLeft = (this.width / 2) - (PANEL_WIDTH / 2);
@@ -2121,18 +2135,26 @@ public class MineifyScreen extends Screen {
         int barY = y + 24;
 
         if (mouseX < barX || mouseX > barX + barWidth || mouseY < barY - 2 || mouseY > barY + 6) {
-            return false;
+            return null;
         }
 
         double ratio = Math.max(0.0, Math.min(1.0, (mouseX - barX) / (double) Math.max(1, barWidth)));
-        long targetMs = (long) (ratio * playbackDurationMs);
-        ClientPlayNetworking.send(new PlaybackControlPacket("seek:" + targetMs));
-        playUiSound(SoundEvents.BLOCK_NOTE_BLOCK_CHIME, 0.45f, 1.15f);
-        return true;
+        return (long) (ratio * playbackDurationMs);
     }
 
     @Override
     public boolean mouseReleased(Click click) {
+        if (click.button() == 0 && nowPlayingSeekActive) {
+            nowPlayingSeekActive = false;
+            if (nowPlayingPendingSeekMs >= 0L) {
+                long targetMs = nowPlayingPendingSeekMs;
+                nowPlayingPendingSeekMs = -1L;
+                ClientPlayNetworking.send(new PlaybackControlPacket("seek:" + targetMs));
+                playUiSound(SoundEvents.BLOCK_NOTE_BLOCK_CHIME, 0.45f, 1.15f);
+                return true;
+            }
+            nowPlayingPendingSeekMs = -1L;
+        }
         if (click.button() == 0 && activeScrollbar != ActiveScrollbar.NONE) {
             activeScrollbar = ActiveScrollbar.NONE;
             return true;

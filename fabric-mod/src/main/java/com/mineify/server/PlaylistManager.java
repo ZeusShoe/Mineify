@@ -64,6 +64,8 @@ public class PlaylistManager {
     private static final String PERM_PLAYLISTS_LIKE = "mineify.playlists.like";
     private static final String PERM_SPOTIFY_IMPORT = "mineify.spotify.import";
     private static final String PERM_RECENTLY_PLAYED_VIEW = "mineify.recently_played.view";
+    private static final long MAX_TRACK_DURATION_MS = 20L * 60L * 1000L;
+    private static final long CLIENT_READY_TIMEOUT_MS = 3000L;
     private static volatile Method permissionsCheckMethod;
     private static volatile boolean permissionsLookupDone = false;
 
@@ -94,6 +96,10 @@ public class PlaylistManager {
     private long currentTrackDurationMs = 0;
     private String currentDownloadUrl = null;
     private long playbackRequestNonce = 0L;
+    private long waitingReadyNonce = -1L;
+    private String waitingReadyVideoId = null;
+    private final java.util.Set<String> waitingReadyPlayers = new java.util.HashSet<>();
+    private ScheduledFuture<?> waitingReadyTimeoutFuture;
     private ScheduledFuture<?> advanceFuture;
     private ScheduledFuture<?> progressFuture;
 
@@ -189,6 +195,11 @@ public class PlaylistManager {
             player.sendMessage(Text.literal("You don't have permission to add songs to queue."), false);
             return;
         }
+        long durationMs = parseDuration(duration);
+        if (durationMs > MAX_TRACK_DURATION_MS) {
+            player.sendMessage(Text.literal("Track is too long. Max allowed duration is 20:00."), false);
+            return;
+        }
         Mineify.LOGGER.info("Player {} adding to playlist: {}", player.getName().getString(), title);
         if (playlist.size() >= MineifyConfig.getMaxPlaylistSize()) {
             player.sendMessage(net.minecraft.text.Text.literal("Queue is full (max " + MineifyConfig.getMaxPlaylistSize() + ")."), false);
@@ -251,9 +262,18 @@ public class PlaylistManager {
             return;
         }
 
+        String actionLower = action.toLowerCase(Locale.ROOT);
+        if (actionLower.startsWith("ready:")) {
+            String videoId = action.substring("ready:".length()).trim();
+            if (!videoId.isBlank()) {
+                handleClientTrackReady(player, videoId);
+            }
+            return;
+        }
+
         boolean legacyPlaybackAllowed = hasLegacyPlaybackControl(player);
 
-        switch (action.toLowerCase()) {
+        switch (actionLower) {
             case "skip" -> {
                 if (!hasPerm(player, PERM_PLAYBACK_SKIP, legacyPlaybackAllowed)) {
                     player.sendMessage(net.minecraft.text.Text.literal("You need moderator permissions to skip tracks."), false);
@@ -326,10 +346,11 @@ public class PlaylistManager {
             return;
         }
         long clampedMs = Math.max(0, Math.min(requestedMs, Math.max(0, currentTrackDurationMs)));
+        long scheduledDelayMs = 0L;
         if (paused) {
             pausedElapsedMs = clampedMs;
         } else {
-            playbackStartNanos = System.nanoTime() - (clampedMs * 1_000_000L);
+            playbackStartNanos = System.nanoTime() + (scheduledDelayMs * 1_000_000L) - (clampedMs * 1_000_000L);
         }
 
         PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
@@ -338,7 +359,8 @@ public class PlaylistManager {
                     currentDownloadUrl,
                     entry.title(),
                     entry.videoId(),
-                    clampedMs
+                    clampedMs,
+                    scheduledDelayMs
             );
             for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
                 ServerPlayNetworking.send(p, seekPacket);
@@ -786,11 +808,13 @@ public class PlaylistManager {
             ServerPlayNetworking.send(player, buildNowPlayingPacket(entry.title(), elapsedMs));
 
             if (currentDownloadUrl != null) {
+                long joinDelayMs = 0L;
                 ServerPlayNetworking.send(player, new PlayAudioPacket(
                         currentDownloadUrl,
                         entry.title(),
                         entry.videoId(),
-                        elapsedMs
+                        elapsedMs,
+                        joinDelayMs
                 ));
             }
 
@@ -802,6 +826,7 @@ public class PlaylistManager {
 
     private void playNext() {
         playbackRequestNonce++;
+        clearClientReadyWait();
         long requestNonce = playbackRequestNonce;
         currentIndex++;
         if (currentIndex >= playlist.size()) {
@@ -842,24 +867,83 @@ public class PlaylistManager {
                     return;
                 }
                 currentDownloadUrl = downloadUrl;
-                playbackStartNanos = System.nanoTime();
+                playbackStartNanos = 0L;
 
                 PlayAudioPacket packet = new PlayAudioPacket(
                         downloadUrl,
                         entry.title(),
                         entry.videoId(),
+                        0L,
                         0L
                 );
+                waitingReadyNonce = requestNonce;
+                waitingReadyVideoId = entry.videoId();
+                waitingReadyPlayers.clear();
+                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+                    waitingReadyPlayers.add(p.getUuidAsString());
+                }
                 for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
                     ServerPlayNetworking.send(p, packet);
                 }
 
-                recordRecentlyPlayed(entry);
-                broadcastPlaybackState(false);
-                broadcastNowPlaying(entry.title(), 0L);
-                scheduleAdvanceFromCurrentState();
+                if (waitingReadyPlayers.isEmpty()) {
+                    startCurrentTrackPlayback(entry);
+                    return;
+                }
+
+                waitingReadyTimeoutFuture = scheduler.schedule(
+                        () -> server.execute(() -> {
+                            if (requestNonce != playbackRequestNonce || currentIndex < 0 || currentIndex >= playlist.size()) {
+                                return;
+                            }
+                            PlaylistSyncPacket.Entry current = playlist.get(currentIndex);
+                            Mineify.LOGGER.warn("Timed out waiting for {} client(s) to ready {}", waitingReadyPlayers.size(), current.videoId());
+                            startCurrentTrackPlayback(current);
+                        }),
+                        CLIENT_READY_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                );
             });
         });
+    }
+
+    private void handleClientTrackReady(ServerPlayerEntity player, String videoId) {
+        if (waitingReadyNonce != playbackRequestNonce || waitingReadyVideoId == null) {
+            return;
+        }
+        if (!waitingReadyVideoId.equals(videoId)) {
+            return;
+        }
+        if (!waitingReadyPlayers.remove(player.getUuidAsString())) {
+            return;
+        }
+        if (!waitingReadyPlayers.isEmpty()) {
+            return;
+        }
+        if (currentIndex < 0 || currentIndex >= playlist.size()) {
+            clearClientReadyWait();
+            return;
+        }
+        startCurrentTrackPlayback(playlist.get(currentIndex));
+    }
+
+    private void startCurrentTrackPlayback(PlaylistSyncPacket.Entry entry) {
+        clearClientReadyWait();
+        playbackStartNanos = System.nanoTime();
+        recordRecentlyPlayed(entry);
+        broadcastPlaybackState(false);
+        broadcastNowPlaying(entry.title(), 0L);
+        scheduleAdvanceFromCurrentState();
+    }
+
+    private void clearClientReadyWait() {
+        waitingReadyNonce = -1L;
+        waitingReadyVideoId = null;
+        waitingReadyPlayers.clear();
+        if (waitingReadyTimeoutFuture != null) {
+            waitingReadyTimeoutFuture.cancel(false);
+            waitingReadyTimeoutFuture = null;
+        }
     }
 
     private void advanceAfterTrackEnd() {
@@ -905,7 +989,8 @@ public class PlaylistManager {
             return;
         }
 
-        long remainingMs = Math.max(0, currentTrackDurationMs - getElapsedPlaybackMs());
+        long remainingUntilStartMs = Math.max(0L, (playbackStartNanos - System.nanoTime()) / 1_000_000L);
+        long remainingMs = remainingUntilStartMs + Math.max(0, currentTrackDurationMs - getElapsedPlaybackMs());
         advanceFuture = scheduler.schedule(
                 () -> server.execute(this::advanceAfterTrackEnd),
                 remainingMs + Math.max(0, MineifyConfig.getPlaybackTrackEndPaddingMs()),
@@ -1388,11 +1473,15 @@ public class PlaylistManager {
         if (playbackStartNanos <= 0) {
             return 0;
         }
+        if (playbackStartNanos > System.nanoTime()) {
+            return 0;
+        }
         return Math.max(0, (System.nanoTime() - playbackStartNanos) / 1_000_000L);
     }
 
     public void shutdown() {
         cancelAdvanceSchedule();
+        clearClientReadyWait();
         if (progressFuture != null) {
             progressFuture.cancel(true);
         }
@@ -1479,6 +1568,7 @@ public class PlaylistManager {
         }
         pushQueueUndoSnapshot("clear");
         playbackRequestNonce++;
+        clearClientReadyWait();
         playlist.clear();
         cancelAdvanceSchedule();
         isPlaying = false;

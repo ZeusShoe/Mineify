@@ -51,11 +51,12 @@ public class AudioPlayer {
         return instance;
     }
 
-    public void play(String downloadUrl, String title, long serverElapsedMs, long packetReceivedAtNanos) {
+    public void play(String downloadUrl, String title, long serverElapsedMs, long packetReceivedAtNanos, long scheduledDelayMs, Runnable onLoaded) {
         executor.submit(() -> {
+            long scheduledStartNanos = packetReceivedAtNanos + Math.max(0L, scheduledDelayMs) * 1_000_000L;
             // Seek updates reuse the loaded clip to avoid re-downloading and audio gaps.
             if (currentClip != null && currentClip.isOpen() && downloadUrl != null && downloadUrl.equals(currentDownloadUrl)) {
-                applySeekToLoadedClip(title, serverElapsedMs, packetReceivedAtNanos);
+                applySeekToLoadedClip(title, serverElapsedMs, scheduledStartNanos);
                 return;
             }
             fadeOutAndStopCurrent();
@@ -107,8 +108,11 @@ public class AudioPlayer {
                     playing = false;
                     paused = false;
                     setClipVolume(clip, 0.0f);
+                    if (onLoaded != null) {
+                        onLoaded.run();
+                    }
 
-                    long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
+                    long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
                     if (startOffsetMs > 0) {
                         long clipLengthUs = clip.getMicrosecondLength();
                         long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
@@ -127,6 +131,13 @@ public class AudioPlayer {
                         paused = true;
                         MineifyClient.LOGGER.info("Loaded '{}' in paused state", title);
                     } else {
+                        waitForScheduledStart(scheduledStartNanos);
+                        long lateAdjustedOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
+                        if (lateAdjustedOffsetMs != startOffsetMs) {
+                            long clipLengthUs = clip.getMicrosecondLength();
+                            long lateTargetUs = Math.max(0, Math.min(lateAdjustedOffsetMs * 1000, clipLengthUs));
+                            clip.setMicrosecondPosition(lateTargetUs);
+                        }
                         suppressMinecraftMusic();
                         clip.start();
                         playing = true;
@@ -169,36 +180,55 @@ public class AudioPlayer {
     public void resume() {
         executor.submit(this::resumeInternal);
     }
-    private void applySeekToLoadedClip(String title, long serverElapsedMs, long packetReceivedAtNanos) {
+    private void applySeekToLoadedClip(String title, long serverElapsedMs, long scheduledStartNanos) {
         Clip clip = currentClip;
         if (clip == null || !clip.isOpen()) {
             return;
         }
-        long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, packetReceivedAtNanos);
+        long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
         long clipLengthUs = clip.getMicrosecondLength();
         long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
         if (targetPositionUs >= clipLengthUs) {
             stopInternal();
             return;
         }
+        if (clip.isRunning()) {
+            suppressStopCallback = true;
+            clip.stop();
+        }
         clip.setMicrosecondPosition(targetPositionUs);
         currentTitle = title;
-        if (!pendingPause && !clip.isRunning()) {
+        if (!pendingPause) {
+            waitForScheduledStart(scheduledStartNanos);
+            long lateAdjustedOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
+            long lateTargetUs = Math.max(0, Math.min(lateAdjustedOffsetMs * 1000, clipLengthUs));
+            clip.setMicrosecondPosition(lateTargetUs);
             suppressMinecraftMusic();
             clip.start();
             playing = true;
             paused = false;
             applyVolume(clip);
+        } else {
+            paused = true;
+            playing = false;
         }
     }
 
-    private long calculateStartOffsetMs(long serverElapsedMs, long packetReceivedAtNanos) {
-        // Do not include local decode/load time in sync math, or tracks jump forward silently.
-        // Only compensate a tiny amount for packet transit/scheduling jitter.
-        long elapsedSinceReceiveMs = Math.max(0, (System.nanoTime() - packetReceivedAtNanos) / 1_000_000L);
-        long boundedCompensationMs = Math.min(200L, elapsedSinceReceiveMs);
-        long baseOffsetMs = Math.max(0, serverElapsedMs);
-        return baseOffsetMs + boundedCompensationMs;
+    private long calculateStartOffsetMs(long serverElapsedMs, long scheduledStartNanos) {
+        long lateMs = Math.max(0L, (System.nanoTime() - scheduledStartNanos) / 1_000_000L);
+        return Math.max(0, serverElapsedMs) + lateMs;
+    }
+
+    private void waitForScheduledStart(long scheduledStartNanos) {
+        long remainingMs = Math.max(0L, (scheduledStartNanos - System.nanoTime()) / 1_000_000L);
+        if (remainingMs <= 0L) {
+            return;
+        }
+        try {
+            Thread.sleep(remainingMs);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void pauseInternal() {

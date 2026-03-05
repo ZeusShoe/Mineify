@@ -14,6 +14,7 @@ public class MineifyConfig {
     private static int playbackTrackEndPaddingMs = 2000;
     private static int playbackProgressBroadcastIntervalMs = 1000;
     private static int playbackCrossfadeMs = 180;
+    private static int playbackPreloadBufferMs = 1000;
     private static int queueUndoMaxHistory = 20;
     private static boolean moderationRequireOpForGlobalQueueControls = true;
     private static boolean uiCompactDefault = false;
@@ -66,6 +67,9 @@ public class MineifyConfig {
                     }
                     if (playbackObj.has("crossfadeMs")) {
                         playbackCrossfadeMs = Math.max(0, playbackObj.get("crossfadeMs").getAsInt());
+                    }
+                    if (playbackObj.has("preloadBufferMs")) {
+                        playbackPreloadBufferMs = Math.max(0, playbackObj.get("preloadBufferMs").getAsInt());
                     }
                     if (playbackObj.has("queueUndoMaxHistory")) {
                         queueUndoMaxHistory = Math.max(1, playbackObj.get("queueUndoMaxHistory").getAsInt());
@@ -181,6 +185,10 @@ public class MineifyConfig {
 
     public static int getPlaybackCrossfadeMs() {
         return playbackCrossfadeMs;
+    }
+
+    public static int getPlaybackPreloadBufferMs() {
+        return playbackPreloadBufferMs;
     }
 
     public static int getQueueUndoMaxHistory() {

@@ -310,7 +310,9 @@ public class MineifyClient implements ClientModInitializer {
                         payload.downloadUrl(),
                         payload.title(),
                         payload.serverElapsedMs(),
-                        packetReceivedAtNanos
+                        packetReceivedAtNanos,
+                        payload.scheduledDelayMs(),
+                        () -> ClientPlayNetworking.send(new com.mineify.network.packets.PlaybackControlPacket("ready:" + payload.videoId()))
                 );
             });
         });
