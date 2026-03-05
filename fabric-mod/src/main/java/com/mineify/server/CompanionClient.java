@@ -136,10 +136,26 @@ public class CompanionClient {
                 .thenApply(response -> {
                     try {
                         JsonObject obj = gson.fromJson(response.body(), JsonObject.class);
+                        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                            String err = (obj != null && obj.has("error") && !obj.get("error").isJsonNull())
+                                    ? obj.get("error").getAsString()
+                                    : ("HTTP " + response.statusCode());
+                            Mineify.LOGGER.error("Download request failed for videoId {}: status={}, error={}, body={}",
+                                    videoId, response.statusCode(), err, response.body());
+                            return null;
+                        }
+                        if (obj == null || !obj.has("downloadUrl") || obj.get("downloadUrl").isJsonNull()) {
+                            Mineify.LOGGER.error("Download response missing downloadUrl for videoId {}: body={}", videoId, response.body());
+                            return null;
+                        }
                         String downloadPath = obj.get("downloadUrl").getAsString();
+                        if (downloadPath == null || downloadPath.isBlank()) {
+                            Mineify.LOGGER.error("Download response contained empty downloadUrl for videoId {}: body={}", videoId, response.body());
+                            return null;
+                        }
                         return baseUrl + downloadPath;
                     } catch (Exception e) {
-                        Mineify.LOGGER.error("Failed to parse download response", e);
+                        Mineify.LOGGER.error("Failed to parse download response for videoId {}: body={}", videoId, response.body(), e);
                         return null;
                     }
                 })
