@@ -12,11 +12,14 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 public class CompanionClient {
     private final String baseUrl;
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
+    private final ConcurrentMap<String, CompletableFuture<String>> inFlightDownloads = new ConcurrentHashMap<>();
 
     public CompanionClient(String baseUrl) {
         this.baseUrl = baseUrl;
@@ -124,6 +127,14 @@ public class CompanionClient {
      * Returns the full download URL that clients can fetch audio from.
      */
     public CompletableFuture<String> requestDownload(String videoId) {
+        if (videoId == null || videoId.isBlank()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        CompletableFuture<String> existing = inFlightDownloads.get(videoId);
+        if (existing != null) {
+            return existing;
+        }
+
         String url = baseUrl + "/api/download";
         String body = gson.toJson(java.util.Map.of("videoId", videoId));
         HttpRequest request = HttpRequest.newBuilder()
@@ -132,7 +143,7 @@ public class CompanionClient {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
 
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        CompletableFuture<String> future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApply(response -> {
                     try {
                         JsonObject obj = gson.fromJson(response.body(), JsonObject.class);
@@ -163,6 +174,10 @@ public class CompanionClient {
                     Mineify.LOGGER.error("Download request failed for videoId: {}", videoId, e);
                     return null;
                 });
+
+        inFlightDownloads.put(videoId, future);
+        future.whenComplete((ok, err) -> inFlightDownloads.remove(videoId));
+        return future;
     }
 
     public String getBaseUrl() {

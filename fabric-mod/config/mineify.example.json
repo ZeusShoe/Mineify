@@ -7,7 +7,7 @@
     "progressBroadcastIntervalMs": 1000,
     "crossfadeMs": 180,
     "preloadBufferMs": 1000,
-    "prefetchCount": 2,
+    "prefetchCount": 0,
     "queueUndoMaxHistory": 20,
     "moderationRequireOpForGlobalQueueControls": true,
     "queueVotingEnabled": false,

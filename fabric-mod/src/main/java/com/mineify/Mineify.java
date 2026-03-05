@@ -62,6 +62,9 @@ public class Mineify implements ModInitializer {
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             LOGGER.info("Mineify: Player {} disconnected",
                     handler.player.getName().getString());
+            if (playlistManager != null) {
+                playlistManager.handlePlayerDisconnect(handler.player);
+            }
         });
 
         LOGGER.info("Mineify initialized successfully!");

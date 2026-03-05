@@ -25,8 +25,7 @@ import java.util.concurrent.Executors;
 
 @Environment(EnvType.CLIENT)
 public class AudioPlayer {
-    private static final int MAX_LOAD_ATTEMPTS = 3;
-    private static final long LOAD_RETRY_DELAY_MS = 350L;
+    private static final int MAX_LOAD_ATTEMPTS = 1;
 
     private static AudioPlayer instance;
 
@@ -130,7 +129,7 @@ public class AudioPlayer {
                         }
                     }
 
-                    long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
+                    long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos, !pendingPause);
                     if (startOffsetMs > 0) {
                         long clipLengthUs = clip.getMicrosecondLength();
                         long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
@@ -150,7 +149,7 @@ public class AudioPlayer {
                         MineifyClient.LOGGER.info("Loaded '{}' in paused state", title);
                     } else {
                         waitForScheduledStart(scheduledStartNanos);
-                        long lateAdjustedOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
+                        long lateAdjustedOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos, true);
                         if (lateAdjustedOffsetMs != startOffsetMs) {
                             long clipLengthUs = clip.getMicrosecondLength();
                             long lateTargetUs = Math.max(0, Math.min(lateAdjustedOffsetMs * 1000, clipLengthUs));
@@ -167,14 +166,6 @@ public class AudioPlayer {
                     lastError = e;
                     MineifyClient.LOGGER.warn("Audio load failed for '{}' (attempt {}/{}): {}", title, attempt, MAX_LOAD_ATTEMPTS, e.toString());
                     stopInternal();
-                    if (attempt < MAX_LOAD_ATTEMPTS) {
-                        try {
-                            Thread.sleep(LOAD_RETRY_DELAY_MS);
-                        } catch (InterruptedException ignored) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                    }
                 }
             }
 
@@ -203,7 +194,7 @@ public class AudioPlayer {
         if (clip == null || !clip.isOpen()) {
             return;
         }
-        long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
+        long startOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos, false);
         long clipLengthUs = clip.getMicrosecondLength();
         long targetPositionUs = Math.max(0, Math.min(startOffsetMs * 1000, clipLengthUs));
         if (targetPositionUs >= clipLengthUs) {
@@ -218,7 +209,7 @@ public class AudioPlayer {
         currentTitle = title;
         if (!pendingPause) {
             waitForScheduledStart(scheduledStartNanos);
-            long lateAdjustedOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos);
+            long lateAdjustedOffsetMs = calculateStartOffsetMs(serverElapsedMs, scheduledStartNanos, false);
             long lateTargetUs = Math.max(0, Math.min(lateAdjustedOffsetMs * 1000, clipLengthUs));
             clip.setMicrosecondPosition(lateTargetUs);
             suppressMinecraftMusic();
@@ -232,12 +223,10 @@ public class AudioPlayer {
         }
     }
 
-    private long calculateStartOffsetMs(long serverElapsedMs, long scheduledStartNanos) {
-        // Never include local download/decode time in playback offset.
-        // Only compensate a tiny amount for packet transit/scheduling jitter.
-        long jitterMs = Math.max(0L, (System.nanoTime() - scheduledStartNanos) / 1_000_000L);
-        long boundedJitterMs = Math.min(200L, jitterMs);
-        return Math.max(0, serverElapsedMs) + boundedJitterMs;
+    private long calculateStartOffsetMs(long serverElapsedMs, long scheduledStartNanos, boolean includeLateDrift) {
+        long elapsedSinceScheduledMs = Math.max(0L, (System.nanoTime() - scheduledStartNanos) / 1_000_000L);
+        long adjustmentMs = includeLateDrift ? elapsedSinceScheduledMs : Math.min(200L, elapsedSinceScheduledMs);
+        return Math.max(0, serverElapsedMs) + adjustmentMs;
     }
 
     private void waitForScheduledStart(long scheduledStartNanos) {

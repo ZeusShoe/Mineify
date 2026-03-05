@@ -66,7 +66,6 @@ public class PlaylistManager {
     private static final String PERM_SPOTIFY_IMPORT = "mineify.spotify.import";
     private static final String PERM_RECENTLY_PLAYED_VIEW = "mineify.recently_played.view";
     private static final long MAX_TRACK_DURATION_MS = 20L * 60L * 1000L;
-    private static final long CLIENT_READY_TIMEOUT_MS = 3000L;
     private static volatile Method permissionsCheckMethod;
     private static volatile boolean permissionsLookupDone = false;
 
@@ -103,7 +102,6 @@ public class PlaylistManager {
     private final Set<String> skipVotes = new java.util.HashSet<>();
     private final Set<String> replayVotes = new java.util.HashSet<>();
     private final Set<String> prefetchInFlight = ConcurrentHashMap.newKeySet();
-    private ScheduledFuture<?> waitingReadyTimeoutFuture;
     private ScheduledFuture<?> advanceFuture;
     private ScheduledFuture<?> progressFuture;
 
@@ -216,10 +214,11 @@ public class PlaylistManager {
         );
         playlist.add(entry);
         syncToAll();
-        prefetchUpcomingTracks();
 
         if (!isPlaying) {
             playNext();
+        } else {
+            prefetchUpcomingTracks();
         }
     }
 
@@ -917,19 +916,6 @@ public class PlaylistManager {
                     return;
                 }
                 prefetchUpcomingTracks();
-
-                waitingReadyTimeoutFuture = scheduler.schedule(
-                        () -> server.execute(() -> {
-                            if (requestNonce != playbackRequestNonce || currentIndex < 0 || currentIndex >= playlist.size()) {
-                                return;
-                            }
-                            PlaylistSyncPacket.Entry current = playlist.get(currentIndex);
-                            Mineify.LOGGER.warn("Timed out waiting for {} client(s) to ready {}", waitingReadyPlayers.size(), current.videoId());
-                            startCurrentTrackPlayback(current);
-                        }),
-                        CLIENT_READY_TIMEOUT_MS,
-                        TimeUnit.MILLISECONDS
-                );
             });
         });
     }
@@ -974,10 +960,23 @@ public class PlaylistManager {
         waitingReadyNonce = -1L;
         waitingReadyVideoId = null;
         waitingReadyPlayers.clear();
-        if (waitingReadyTimeoutFuture != null) {
-            waitingReadyTimeoutFuture.cancel(false);
-            waitingReadyTimeoutFuture = null;
+    }
+
+    public void handlePlayerDisconnect(ServerPlayerEntity player) {
+        if (player == null || waitingReadyVideoId == null || waitingReadyPlayers.isEmpty()) {
+            return;
         }
+        if (!waitingReadyPlayers.remove(player.getUuidAsString())) {
+            return;
+        }
+        if (!waitingReadyPlayers.isEmpty()) {
+            return;
+        }
+        if (currentIndex < 0 || currentIndex >= playlist.size()) {
+            clearClientReadyWait();
+            return;
+        }
+        startCurrentTrackPlayback(playlist.get(currentIndex));
     }
 
     private void handleVoteSkip(ServerPlayerEntity player) {
@@ -1041,7 +1040,8 @@ public class PlaylistManager {
         if (count <= 0 || playlist.isEmpty()) {
             return;
         }
-        int start = Math.max(0, currentIndex + 1);
+        int start = (isPlaying && currentIndex >= 0) ? (currentIndex + 1) : 1;
+        start = Math.max(0, start);
         int end = Math.min(playlist.size(), start + count);
         for (int i = start; i < end; i++) {
             String videoId = playlist.get(i).videoId();
