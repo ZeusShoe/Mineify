@@ -943,12 +943,25 @@ public class PlaylistManager {
     private void startCurrentTrackPlayback(PlaylistSyncPacket.Entry entry) {
         clearClientReadyWait();
         clearVotes();
-        playbackStartNanos = System.nanoTime();
+        long startDelayMs = Math.max(0, MineifyConfig.getPlaybackPreloadBufferMs());
+        playbackStartNanos = System.nanoTime() + (startDelayMs * 1_000_000L);
         paused = false;
         pausedElapsedMs = 0;
         recordRecentlyPlayed(entry);
         if (MineifyConfig.isNowPlayingChatCardsEnabled()) {
             broadcastNowPlayingCard(entry);
+        }
+        if (currentDownloadUrl != null) {
+            PlayAudioPacket startPacket = new PlayAudioPacket(
+                    currentDownloadUrl,
+                    entry.title(),
+                    entry.videoId(),
+                    0L,
+                    startDelayMs
+            );
+            for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+                ServerPlayNetworking.send(p, startPacket);
+            }
         }
         broadcastPlaybackState(false);
         broadcastNowPlaying(entry.title(), 0L);

@@ -14,8 +14,8 @@ public class MineifyConfig {
     private static int playbackTrackEndPaddingMs = 2000;
     private static int playbackProgressBroadcastIntervalMs = 1000;
     private static int playbackCrossfadeMs = 180;
-    private static int playbackPreloadBufferMs = 1000;
-    private static int playbackPrefetchCount = 0;
+    private static int playbackPreloadBufferMs = 200;
+    private static int playbackPrefetchCount = 2;
     private static int queueUndoMaxHistory = 20;
     private static boolean moderationRequireOpForGlobalQueueControls = true;
     private static boolean queueVotingEnabled = false;
