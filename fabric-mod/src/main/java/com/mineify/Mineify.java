@@ -126,7 +126,11 @@ public class Mineify implements ModInitializer {
 
     private static boolean isOp(ServerCommandSource source) {
         if (source.getEntity() instanceof ServerPlayerEntity player) {
-            return source.getServer().getPlayerManager().isOperator(player.getGameProfile());
+            try {
+                return source.getServer().getPlayerManager().getOpList().contains(player.getGameProfile());
+            } catch (Exception ignored) {
+                return false;
+            }
         }
         return true;
     }
