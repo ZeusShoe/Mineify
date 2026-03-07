@@ -7,9 +7,10 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.minecraft.server.PlayerConfigEntry;
+import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.command.CommandManager;
 import net.minecraft.text.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -126,7 +127,10 @@ public class Mineify implements ModInitializer {
 
     private static boolean isOp(ServerCommandSource source) {
         if (source.getEntity() instanceof ServerPlayerEntity player) {
-            return player.hasPermissionLevel(2);
+            return source.getServer()
+                    .getPlayerManager()
+                    .getOpList()
+                    .contains(new PlayerConfigEntry(player.getGameProfile()));
         }
         return true;
     }
