@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 const inFlightDownloads = new Map();
 
 export async function downloadAsWav(videoId, downloadDir) {
-    const outputPath = path.join(downloadDir, `${videoId}.wav`);
+    const outputPath = path.join(downloadDir, `${videoId}.mp3`);
     fs.mkdirSync(downloadDir, { recursive: true });
 
     // Return immediately if already downloaded
@@ -20,7 +20,8 @@ export async function downloadAsWav(videoId, downloadDir) {
 
     const promise = execFileAsync('yt-dlp', [
         '-x',
-        '--audio-format', 'wav',
+        '--audio-format', 'mp3',
+        '--audio-quality', '320K',
         '--js-runtimes', 'node',
         '-o', outputPath,
         '--no-playlist',
@@ -34,7 +35,7 @@ export async function downloadAsWav(videoId, downloadDir) {
 }
 
 export function deleteDownload(videoId, downloadDir) {
-    const filePath = path.join(downloadDir, `${videoId}.wav`);
+    const filePath = path.join(downloadDir, `${videoId}.mp3`);
     if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
         return true;

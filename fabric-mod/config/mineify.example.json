@@ -1,4 +1,5 @@
 {
+  "configVersion": 2,
   "companionServiceUrl": "http://localhost:3001",
   "maxPlaylistSize": 50,
   "audioSessionFolder": "./mineify-sessions",
@@ -43,5 +44,9 @@
   },
   "ui": {
     "compactDefault": false
+  },
+  "metrics": {
+    "enabled": false,
+    "logIntervalSeconds": 300
   }
 }

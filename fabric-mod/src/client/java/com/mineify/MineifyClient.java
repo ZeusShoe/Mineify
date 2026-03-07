@@ -2,10 +2,13 @@ package com.mineify;
 
 import com.mineify.client.MineifyKeybinds;
 import com.mineify.client.MineifyScreen;
+import com.mineify.client.VoiceDuckingDetector;
 import com.mineify.client.audio.AudioPlayer;
 import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
+import com.mineify.network.packets.PlaybackLockPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
+import com.mineify.network.packets.PrefetchAudioPacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.RecentlyPlayedSyncPacket;
@@ -19,6 +22,7 @@ import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.MinecraftClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +41,7 @@ public class MineifyClient implements ClientModInitializer {
     private static long cachedElapsedMs = 0;
     private static long cachedDurationMs = 0;
     private static boolean cachedPaused = false;
+    private static boolean cachedControlsLocked = false;
     private static List<MineifyScreen.UserPlaylistSummary> cachedUserPlaylists = new ArrayList<>();
     private static List<MineifyScreen.ProfileSummary> cachedProfiles = new ArrayList<>();
     private static List<MineifyScreen.RecentlyPlayedEntry> cachedRecentlyPlayed = new ArrayList<>();
@@ -65,6 +70,10 @@ public class MineifyClient implements ClientModInitializer {
         return cachedPaused;
     }
 
+    public static boolean isCachedControlsLocked() {
+        return cachedControlsLocked;
+    }
+
     public static List<MineifyScreen.UserPlaylistSummary> getCachedUserPlaylists() {
         return new ArrayList<>(cachedUserPlaylists);
     }
@@ -82,6 +91,15 @@ public class MineifyClient implements ClientModInitializer {
         LOGGER.info("Initializing Mineify Client");
 
         MineifyKeybinds.register();
+
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            AudioPlayer player = AudioPlayer.getInstance();
+            if (player.isDuckingEnabled()) {
+                player.setDuckingActive(VoiceDuckingDetector.isVoiceActive());
+            } else {
+                player.setDuckingActive(false);
+            }
+        });
 
         // Register client-side packet handlers
         ClientPlayNetworking.registerGlobalReceiver(SearchResultsPacket.ID, (payload, context) -> {
@@ -309,6 +327,7 @@ public class MineifyClient implements ClientModInitializer {
                 AudioPlayer.getInstance().play(
                         payload.downloadUrl(),
                         payload.title(),
+                        payload.videoId(),
                         payload.serverElapsedMs(),
                         packetReceivedAtNanos,
                         payload.scheduledDelayMs(),
@@ -316,6 +335,12 @@ public class MineifyClient implements ClientModInitializer {
                                 ClientPlayNetworking.send(new com.mineify.network.packets.PlaybackControlPacket("ready:" + payload.videoId()))
                         )
                 );
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(PrefetchAudioPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                AudioPlayer.getInstance().prefetch(payload.downloadUrl(), payload.videoId());
             });
         });
 
@@ -334,6 +359,15 @@ public class MineifyClient implements ClientModInitializer {
             });
         });
 
+        ClientPlayNetworking.registerGlobalReceiver(PlaybackLockPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                cachedControlsLocked = payload.locked();
+                if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
+                    screen.updatePlaybackControlsLocked(payload.locked());
+                }
+            });
+        });
+
         // Stop audio when disconnecting from server
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             LOGGER.info("Disconnected from server, stopping audio");
@@ -343,6 +377,7 @@ public class MineifyClient implements ClientModInitializer {
             cachedElapsedMs = 0;
             cachedDurationMs = 0;
             cachedPaused = false;
+            cachedControlsLocked = false;
             cachedPlaylist = new ArrayList<>();
             cachedUserPlaylists = new ArrayList<>();
             cachedProfiles = new ArrayList<>();

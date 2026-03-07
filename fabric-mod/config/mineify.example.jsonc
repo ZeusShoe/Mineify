@@ -1,0 +1,121 @@
+// Mineify configuration reference (JSONC for comments).
+// Copy values into config/mineify.json (pure JSON, no comments).
+{
+  // Config schema version.
+  "configVersion": 2,
+  // Base URL for the MineifyCompanion service.
+  "companionServiceUrl": "https://mineify-api.cuboidal.net",
+
+  // Maximum number of tracks allowed in the server queue.
+  "maxPlaylistSize": 50,
+
+  // Server-side audio session folder (reserved for future use).
+  "audioSessionFolder": "./mineify-sessions",
+
+  "playback": {
+    // Extra padding after a track ends before moving to the next track.
+    "trackEndPaddingMs": 2000,
+
+    // How often the server broadcasts playback progress to clients.
+    "progressBroadcastIntervalMs": 1000,
+
+    // Fade duration used when starting/stopping playback.
+    "crossfadeMs": 180,
+
+    // Delay added after all clients are ready to align start time.
+    "preloadBufferMs": 200,
+
+    // How many upcoming tracks to prefetch.
+    "prefetchCount": 2,
+
+    // How many queue snapshots to keep for Undo.
+    "queueUndoMaxHistory": 20,
+
+    // If true, only the player who added the current track (or OP) can
+    // control pause/skip/seek. If false, everyone can control playback.
+    "moderationRequireOpForGlobalQueueControls": true,
+
+    // Enable vote-based skip/replay instead of direct control.
+    "queueVotingEnabled": false,
+
+    // Minimum votes required for skip/replay.
+    "queueVotingMinVotes": 2,
+
+    // Fraction of online players needed to pass a vote.
+    "queueVotingThreshold": 0.6
+  },
+
+  "recentlyPlayed": {
+    // Enable the Recently Played tab and server history file.
+    "enabled": true,
+
+    // Max number of entries stored on disk.
+    "maxEntries": 200,
+
+    // Max number of items shown in the UI at once.
+    "uiMaxVisibleEntries": 20,
+
+    // File path (relative to server run dir) for persistence.
+    "persistPath": "MineifyCompanion/recently_played.json",
+
+    // If true, broadcast recently played updates to clients immediately.
+    "broadcastOnUpdate": true
+  },
+
+  "spotifyImport": {
+    // Enable Spotify playlist import features.
+    "enabled": true,
+
+    // If true, requires Spotify client credentials in companion.
+    "requireClientCredentials": true,
+
+    // Auto-match threshold for YouTube search results.
+    "autoMatchThreshold": 0.72,
+
+    // Hard cap on imported track count.
+    "maxTracksPerImport": 300,
+
+    // How many tracks are shown in the import preview UI.
+    "previewMaxTracks": 300
+  },
+
+  "playlists": {
+    // Max playlists each player can create.
+    "maxPlaylistsPerUser": 25,
+
+    // Max tracks per playlist.
+    "maxTracksPerPlaylist": 500,
+
+    // Max playlist name length.
+    "maxNameLength": 50,
+
+    // Default privacy for new playlists.
+    "defaultPublic": true,
+
+    // Enable playlist likes feature.
+    "enableLikes": true
+  },
+
+  "permissions": {
+    // If true, Mineify checks permission nodes (LuckPerms compatible).
+    // If false, everyone can use all features.
+    "enabled": false
+  },
+
+  "announcements": {
+    // If true, broadcast "Now Playing" chat cards.
+    "nowPlayingChatCards": true
+  },
+
+  "ui": {
+    // If true, default to the compact UI layout.
+    "compactDefault": false
+  },
+  "metrics": {
+    // Enable periodic diagnostic logs about download/start delays.
+    "enabled": false,
+
+    // How often to log metrics (seconds).
+    "logIntervalSeconds": 300
+  }
+}

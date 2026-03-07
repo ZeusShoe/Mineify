@@ -7,7 +7,9 @@ import com.mineify.Mineify;
 import com.mineify.MineifyConfig;
 import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
+import com.mineify.network.packets.PlaybackLockPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
+import com.mineify.network.packets.PrefetchAudioPacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
@@ -69,8 +71,37 @@ public class PlaylistManager {
     private static volatile Method permissionsCheckMethod;
     private static volatile boolean permissionsLookupDone = false;
 
+    public static List<String> getPermissionNodes() {
+        return List.of(
+                PERM_SEARCH,
+                PERM_QUEUE_ADD,
+                PERM_QUEUE_REMOVE,
+                PERM_QUEUE_REORDER,
+                PERM_QUEUE_UNDO,
+                PERM_QUEUE_CLEAR,
+                PERM_PLAYBACK_SKIP,
+                PERM_PLAYBACK_PAUSE,
+                PERM_PLAYBACK_RESUME,
+                PERM_PLAYBACK_SEEK,
+                PERM_PLAYLISTS_VIEW,
+                PERM_PLAYLISTS_CREATE,
+                PERM_PLAYLISTS_ADD_TRACK,
+                PERM_PLAYLISTS_LIKE,
+                PERM_SPOTIFY_IMPORT,
+                PERM_RECENTLY_PLAYED_VIEW
+        );
+    }
+
+    public record PlaylistStatus(
+            boolean playing,
+            boolean paused,
+            String nowPlayingTitle,
+            int queueSize,
+            boolean waitingForReady
+    ) {}
+
     private final MinecraftServer server;
-    private final CompanionClient companionClient;
+    private CompanionClient companionClient;
     private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
     private final List<PlaylistSyncPacket.Entry> playlist = new CopyOnWriteArrayList<>();
     private final Deque<QueueSnapshot> queueUndoHistory = new ArrayDeque<>();
@@ -102,6 +133,12 @@ public class PlaylistManager {
     private final Set<String> skipVotes = new java.util.HashSet<>();
     private final Set<String> replayVotes = new java.util.HashSet<>();
     private final Set<String> prefetchInFlight = ConcurrentHashMap.newKeySet();
+    private long metricsNextLogAtMs = 0L;
+    private long metricsDownloadCount = 0L;
+    private long metricsDownloadTotalMs = 0L;
+    private long metricsReadyCount = 0L;
+    private long metricsReadyTotalMs = 0L;
+    private long waitingReadyStartedAtNs = 0L;
     private ScheduledFuture<?> advanceFuture;
     private ScheduledFuture<?> progressFuture;
 
@@ -169,7 +206,14 @@ public class PlaylistManager {
                 PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
                 server.execute(() -> broadcastNowPlaying(entry.title(), getElapsedPlaybackMs()));
             }
+            maybeLogMetrics();
         }, 1000, Math.max(250, MineifyConfig.getPlaybackProgressBroadcastIntervalMs()), TimeUnit.MILLISECONDS);
+    }
+
+    public void setCompanionClient(CompanionClient companionClient) {
+        if (companionClient != null) {
+            this.companionClient = companionClient;
+        }
     }
 
     public void handleSearch(ServerPlayerEntity player, String query) {
@@ -274,6 +318,16 @@ public class PlaylistManager {
                 handleClientTrackReady(player, videoId);
             }
             return;
+        }
+
+        boolean controlsLocked = waitingReadyVideoId != null && !waitingReadyPlayers.isEmpty();
+        if (controlsLocked) {
+            if (actionLower.equals("pause")
+                    || actionLower.equals("resume")
+                    || actionLower.equals("replay")
+                    || actionLower.startsWith("seek:")) {
+                return;
+            }
         }
 
         boolean legacyPlaybackAllowed = hasLegacyPlaybackControl(player);
@@ -840,6 +894,8 @@ public class PlaylistManager {
 
             ServerPlayNetworking.send(player, new PlaybackStatePacket(paused));
         }
+        boolean locked = waitingReadyVideoId != null && !waitingReadyPlayers.isEmpty();
+        ServerPlayNetworking.send(player, new PlaybackLockPacket(locked));
         syncUserPlaylistsToPlayer(player);
         syncRecentlyPlayedToPlayer(player);
     }
@@ -861,6 +917,7 @@ public class PlaylistManager {
             currentTrackDurationMs = 0;
             broadcastNowPlaying("", 0);
             broadcastPlaybackState(false);
+            broadcastPlaybackLock(false);
             return;
         }
 
@@ -871,8 +928,12 @@ public class PlaylistManager {
         currentTrackDurationMs = parseDuration(entry.duration());
 
         Mineify.LOGGER.info("Requesting download for: {} ({})", entry.title(), entry.videoId());
+        long downloadStartNs = System.nanoTime();
 
         companionClient.requestDownload(entry.videoId()).thenAccept(downloadUrl -> {
+            long downloadElapsedMs = Math.max(0L, (System.nanoTime() - downloadStartNs) / 1_000_000L);
+            metricsDownloadCount++;
+            metricsDownloadTotalMs += downloadElapsedMs;
             if (downloadUrl == null) {
                 Mineify.LOGGER.error("Download failed for: {}", entry.title());
                 server.execute(() -> {
@@ -903,10 +964,11 @@ public class PlaylistManager {
                 for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
                     waitingReadyPlayers.add(p.getUuidAsString());
                 }
-                // Hold clients in paused state while they load; start all together on ready.
-                paused = true;
+                waitingReadyStartedAtNs = System.nanoTime();
+                // Hold controls while clients load; start all together on ready.
+                paused = false;
                 pausedElapsedMs = 0;
-                broadcastPlaybackState(true);
+                broadcastPlaybackLock(true);
                 for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
                     ServerPlayNetworking.send(p, packet);
                 }
@@ -943,6 +1005,12 @@ public class PlaylistManager {
     private void startCurrentTrackPlayback(PlaylistSyncPacket.Entry entry) {
         clearClientReadyWait();
         clearVotes();
+        if (waitingReadyStartedAtNs > 0L) {
+            long waitMs = Math.max(0L, (System.nanoTime() - waitingReadyStartedAtNs) / 1_000_000L);
+            metricsReadyCount++;
+            metricsReadyTotalMs += waitMs;
+            waitingReadyStartedAtNs = 0L;
+        }
         long startDelayMs = Math.max(0, MineifyConfig.getPlaybackPreloadBufferMs());
         playbackStartNanos = System.nanoTime() + (startDelayMs * 1_000_000L);
         paused = false;
@@ -963,6 +1031,7 @@ public class PlaylistManager {
                 ServerPlayNetworking.send(p, startPacket);
             }
         }
+        broadcastPlaybackLock(false);
         broadcastPlaybackState(false);
         broadcastNowPlaying(entry.title(), 0L);
         scheduleAdvanceFromCurrentState();
@@ -973,6 +1042,7 @@ public class PlaylistManager {
         waitingReadyNonce = -1L;
         waitingReadyVideoId = null;
         waitingReadyPlayers.clear();
+        waitingReadyStartedAtNs = 0L;
     }
 
     public void handlePlayerDisconnect(ServerPlayerEntity player) {
@@ -1061,7 +1131,16 @@ public class PlaylistManager {
             if (!prefetchInFlight.add(videoId)) {
                 continue;
             }
-            companionClient.requestDownload(videoId).whenComplete((url, err) -> prefetchInFlight.remove(videoId));
+            companionClient.requestDownload(videoId).whenComplete((url, err) -> {
+                prefetchInFlight.remove(videoId);
+                if (err != null || url == null || url.isBlank()) {
+                    return;
+                }
+                PrefetchAudioPacket packet = new PrefetchAudioPacket(url, videoId);
+                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+                    ServerPlayNetworking.send(p, packet);
+                }
+            });
         }
     }
 
@@ -1150,6 +1229,35 @@ public class PlaylistManager {
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, packet);
         }
+    }
+
+    private void broadcastPlaybackLock(boolean locked) {
+        PlaybackLockPacket packet = new PlaybackLockPacket(locked);
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(player, packet);
+        }
+    }
+
+    private void maybeLogMetrics() {
+        if (!MineifyConfig.isMetricsEnabled()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (metricsNextLogAtMs <= 0L) {
+            metricsNextLogAtMs = now + (MineifyConfig.getMetricsLogIntervalSeconds() * 1000L);
+            return;
+        }
+        if (now < metricsNextLogAtMs) {
+            return;
+        }
+        metricsNextLogAtMs = now + (MineifyConfig.getMetricsLogIntervalSeconds() * 1000L);
+        double avgDownload = metricsDownloadCount > 0 ? (metricsDownloadTotalMs / (double) metricsDownloadCount) : 0d;
+        double avgReady = metricsReadyCount > 0 ? (metricsReadyTotalMs / (double) metricsReadyCount) : 0d;
+        Mineify.LOGGER.info("Mineify metrics: avgDownloadMs={}, avgReadyWaitMs={}, samplesDownload={}, samplesReady={}",
+                String.format(Locale.ROOT, "%.1f", avgDownload),
+                String.format(Locale.ROOT, "%.1f", avgReady),
+                metricsDownloadCount,
+                metricsReadyCount);
     }
 
     private void broadcastNowPlayingCard(PlaylistSyncPacket.Entry entry) {
@@ -1628,6 +1736,15 @@ public class PlaylistManager {
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
     }
 
+    public PlaylistStatus getStatus() {
+        String title = "";
+        if (isPlaying && currentIndex >= 0 && currentIndex < playlist.size()) {
+            title = playlist.get(currentIndex).title();
+        }
+        boolean waiting = waitingReadyVideoId != null && !waitingReadyPlayers.isEmpty();
+        return new PlaylistStatus(isPlaying, paused, title, playlist.size(), waiting);
+    }
+
     private boolean hasPerm(ServerPlayerEntity player, String node, boolean fallback) {
         if (!MineifyConfig.isPermissionsEnabled()) {
             return true;
@@ -1715,6 +1832,7 @@ public class PlaylistManager {
         syncToAll();
         broadcastNowPlaying("", 0);
         broadcastPlaybackState(false);
+        broadcastPlaybackLock(false);
     }
 
     private static class QueueSnapshot {

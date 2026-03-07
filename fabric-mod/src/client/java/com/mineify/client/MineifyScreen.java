@@ -97,6 +97,10 @@ public class MineifyScreen extends Screen {
     private ButtonWidget spotifyOptionButton2;
     private ButtonWidget spotifyOptionButton3;
     private ButtonWidget spotifySkipButton;
+    private ButtonWidget optionsToggleOutputButton;
+    private ButtonWidget optionsSelectOutputButton;
+    private ButtonWidget optionsDuckingToggleButton;
+    private SliderWidget optionsDuckingStrengthSlider;
 
     private List<SearchResult> searchResults = new ArrayList<>();
     private List<PlaylistEntry> playlist = new ArrayList<>();
@@ -116,6 +120,7 @@ public class MineifyScreen extends Screen {
     private long playbackElapsedMs = 0;
     private long playbackDurationMs = 0;
     private boolean playbackPaused = false;
+    private boolean playbackControlsLocked = false;
     private boolean queueDragActive = false;
     private int queueDragFromIndex = -1;
     private int queueDragTargetIndex = -1;
@@ -142,6 +147,8 @@ public class MineifyScreen extends Screen {
     private boolean nowPlayingSeekActive = false;
     private long nowPlayingPendingSeekMs = -1L;
     private boolean showClearQueueConfirm = false;
+    private List<String> availableOutputDevices = new ArrayList<>();
+    private int selectedOutputDeviceIndex = -1;
     private ActiveScrollbar activeScrollbar = ActiveScrollbar.NONE;
     private int activeScrollbarTop = 0;
     private int activeScrollbarBottom = 0;
@@ -185,12 +192,18 @@ public class MineifyScreen extends Screen {
                 .build();
         this.addDrawableChild(this.searchButton);
 
-        ButtonWidget searchTabBtn = ButtonWidget.builder(Text.literal("Search"), button -> this.currentTab = 0)
+        ButtonWidget searchTabBtn = ButtonWidget.builder(Text.literal("Search"), button -> {
+                    this.currentTab = 0;
+                    updateOptionsControls();
+                })
                 .dimensions(panelLeft + 10, panelTop + 5, 60, 20)
                 .build();
         this.addDrawableChild(searchTabBtn);
 
-        ButtonWidget playlistTabBtn = ButtonWidget.builder(Text.literal("Queue"), button -> this.currentTab = 1)
+        ButtonWidget playlistTabBtn = ButtonWidget.builder(Text.literal("Queue"), button -> {
+                    this.currentTab = 1;
+                    updateOptionsControls();
+                })
                 .dimensions(panelLeft + 75, panelTop + 5, 60, 20)
                 .build();
         this.addDrawableChild(playlistTabBtn);
@@ -198,6 +211,7 @@ public class MineifyScreen extends Screen {
         ButtonWidget playlistsTabBtn = ButtonWidget.builder(Text.literal("Playlists"), button -> {
                     this.currentTab = 2;
                     requestProfilesSync(profileSearchField == null ? "" : profileSearchField.getText());
+                    updateOptionsControls();
                 })
                 .dimensions(panelLeft + 140, panelTop + 5, 70, 20)
                 .build();
@@ -206,10 +220,20 @@ public class MineifyScreen extends Screen {
         ButtonWidget recentTabBtn = ButtonWidget.builder(Text.literal("Recent"), button -> {
                     this.currentTab = 3;
                     requestRecentlyPlayedSync();
+                    updateOptionsControls();
                 })
                 .dimensions(panelLeft + 215, panelTop + 5, 60, 20)
                 .build();
         this.addDrawableChild(recentTabBtn);
+
+        ButtonWidget optionsTabBtn = ButtonWidget.builder(Text.literal("Options"), button -> {
+                    this.currentTab = 4;
+                    refreshOutputDevices();
+                    updateOptionsControls();
+                })
+                .dimensions(panelLeft + 280, panelTop + 5, 70, 20)
+                .build();
+        this.addDrawableChild(optionsTabBtn);
 
         int controlButtonY = bottomSectionTop + ((NOW_PLAYING_HEIGHT - 18) / 2);
 
@@ -282,6 +306,75 @@ public class MineifyScreen extends Screen {
             }
         };
         this.addDrawableChild(this.volumeSlider);
+
+        int optionsLeft = panelLeft + 14;
+        int optionsTop = panelTop + 42;
+        int optionsWidth = PANEL_WIDTH - 28;
+        this.optionsToggleOutputButton = ButtonWidget.builder(Text.literal("Set Custom Output Device: OFF"), button -> {
+                    boolean enabled = !AudioPlayer.getInstance().isCustomOutputEnabled();
+                    AudioPlayer.getInstance().setCustomOutputEnabled(enabled);
+                    if (enabled) {
+                        refreshOutputDevices();
+                        if (!availableOutputDevices.isEmpty() && selectedOutputDeviceIndex < 0) {
+                            selectedOutputDeviceIndex = 0;
+                            AudioPlayer.getInstance().setCustomOutputMixerName(availableOutputDevices.get(0));
+                        }
+                    }
+                    updateOptionsControls();
+                })
+                .dimensions(optionsLeft, optionsTop, optionsWidth, 20)
+                .build();
+        this.optionsToggleOutputButton.visible = false;
+        this.optionsToggleOutputButton.active = false;
+        this.addDrawableChild(this.optionsToggleOutputButton);
+
+        this.optionsSelectOutputButton = ButtonWidget.builder(Text.literal("Output Device: Default"), button -> {
+                    if (availableOutputDevices.isEmpty()) {
+                        return;
+                    }
+                    selectedOutputDeviceIndex = (selectedOutputDeviceIndex + 1) % availableOutputDevices.size();
+                    AudioPlayer.getInstance().setCustomOutputMixerName(availableOutputDevices.get(selectedOutputDeviceIndex));
+                    updateOptionsControls();
+                })
+                .dimensions(optionsLeft, optionsTop + 24, optionsWidth, 20)
+                .build();
+        this.optionsSelectOutputButton.visible = false;
+        this.optionsSelectOutputButton.active = false;
+        this.addDrawableChild(this.optionsSelectOutputButton);
+
+        this.optionsDuckingToggleButton = ButtonWidget.builder(Text.literal("Voice Ducking: OFF"), button -> {
+                    boolean enabled = !AudioPlayer.getInstance().isDuckingEnabled();
+                    AudioPlayer.getInstance().setDuckingEnabled(enabled);
+                    updateOptionsControls();
+                })
+                .dimensions(optionsLeft, optionsTop + 52, optionsWidth, 20)
+                .build();
+        this.optionsDuckingToggleButton.visible = false;
+        this.optionsDuckingToggleButton.active = false;
+        this.addDrawableChild(this.optionsDuckingToggleButton);
+
+        this.optionsDuckingStrengthSlider = new SliderWidget(
+                optionsLeft,
+                optionsTop + 76,
+                optionsWidth,
+                20,
+                Text.literal("Ducking Strength: 35%"),
+                AudioPlayer.getInstance().getDuckingStrength()
+        ) {
+            @Override
+            protected void updateMessage() {
+                int pct = (int) (this.value * 100);
+                this.setMessage(Text.literal("Ducking Strength: " + pct + "%"));
+            }
+
+            @Override
+            protected void applyValue() {
+                AudioPlayer.getInstance().setDuckingStrength((float) this.value);
+            }
+        };
+        this.optionsDuckingStrengthSlider.visible = false;
+        this.optionsDuckingStrengthSlider.active = false;
+        this.addDrawableChild(this.optionsDuckingStrengthSlider);
 
         int modalLeft = centerX - (MODAL_WIDTH / 2);
         int modalTop = centerY - (MODAL_HEIGHT / 2);
@@ -421,6 +514,7 @@ public class MineifyScreen extends Screen {
         updateSpotifyControls(panelLeft, panelTop);
         updateSpotifyPreviewControls();
         updateSpotifyPromptButtons();
+        updateOptionsControls();
     }
 
     @Override
@@ -491,6 +585,8 @@ public class MineifyScreen extends Screen {
             renderPlaylistTab(context, panelLeft, panelTop, mouseX, mouseY);
         } else if (currentTab == 2) {
             renderProfilesTab(context, panelLeft, panelTop, mouseX, mouseY);
+        } else if (currentTab == 4) {
+            renderOptionsTab(context, panelLeft, panelTop);
         } else {
             renderRecentlyPlayedTab(context, panelLeft, panelTop);
         }
@@ -900,6 +996,23 @@ public class MineifyScreen extends Screen {
                 top + 28,
                 0xFFDDDDDD
         );
+    }
+
+    private void renderOptionsTab(DrawContext context, int panelLeft, int panelTop) {
+        int left = panelLeft + 10;
+        int top = panelTop + CONTENT_TOP_NO_SEARCH;
+        int right = panelLeft + PANEL_WIDTH - 10;
+        int bottom = getListBottom(panelTop);
+        context.fill(left, top - 2, right, bottom, 0x1A000000);
+
+        int y = top + 6;
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Audio Output"), left + 6, y, 0xFFBFC7D5);
+        y += 16;
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Choose a custom output device for Mineify audio."), left + 6, y, 0xFF6E7786);
+        y += 44;
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Voice Ducking"), left + 6, y, 0xFFBFC7D5);
+        y += 16;
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Lower Mineify volume while speaking in voice chat."), left + 6, y, 0xFF6E7786);
     }
 
     private void renderContextMenu(DrawContext context, int mouseX, int mouseY) {
@@ -2127,6 +2240,9 @@ public class MineifyScreen extends Screen {
         if (showPlaylistPicker || showCreatePlaylistDialog || showSpotifyPromptDialog || showSpotifyPreviewDialog) {
             return null;
         }
+        if (playbackControlsLocked) {
+            return null;
+        }
         if (nowPlaying == null || playbackDurationMs <= 0) {
             return null;
         }
@@ -2153,6 +2269,10 @@ public class MineifyScreen extends Screen {
         if (click.button() == 0 && nowPlayingSeekActive) {
             nowPlayingSeekActive = false;
             if (nowPlayingPendingSeekMs >= 0L) {
+                if (playbackControlsLocked) {
+                    nowPlayingPendingSeekMs = -1L;
+                    return true;
+                }
                 long targetMs = nowPlayingPendingSeekMs;
                 nowPlayingPendingSeekMs = -1L;
                 ClientPlayNetworking.send(new PlaybackControlPacket("seek:" + targetMs));
@@ -2424,10 +2544,13 @@ public class MineifyScreen extends Screen {
         this.playbackElapsedMs = MineifyClient.getCachedElapsedMs();
         this.playbackDurationMs = MineifyClient.getCachedDurationMs();
         this.playbackPaused = MineifyClient.isCachedPaused();
+        this.playbackControlsLocked = MineifyClient.isCachedControlsLocked();
         this.userPlaylists = MineifyClient.getCachedUserPlaylists();
         this.profiles = MineifyClient.getCachedProfiles();
         this.recentlyPlayed = MineifyClient.getCachedRecentlyPlayed();
         ensureSelectedProfile();
+        updateControlButtons();
+        refreshOutputDevices();
     }
 
     private void requestUserPlaylistSync() {
@@ -2521,17 +2644,73 @@ public class MineifyScreen extends Screen {
         updateControlButtons();
     }
 
+    public void updatePlaybackControlsLocked(boolean locked) {
+        this.playbackControlsLocked = locked;
+        updateControlButtons();
+    }
+
     private void updateControlButtons() {
         boolean hasTrack = nowPlaying != null;
+        boolean controlsEnabled = hasTrack && !playbackControlsLocked;
         if (pauseResumeButton != null) {
-            pauseResumeButton.active = hasTrack;
-            pauseResumeButton.setMessage(Text.literal(playbackPaused ? "▶" : "⏸"));
+            pauseResumeButton.active = controlsEnabled;
+            pauseResumeButton.setMessage(Text.literal(playbackPaused ? "\u25B6" : "\u23F8"));
         }
         if (replayButton != null) {
-            replayButton.active = hasTrack;
+            replayButton.active = controlsEnabled;
         }
         if (skipButton != null) {
             skipButton.active = hasTrack;
+        }
+    }
+
+    private void updateOptionsControls() {
+        boolean showOptions = currentTab == 4;
+        if (optionsToggleOutputButton != null) {
+            boolean enabled = AudioPlayer.getInstance().isCustomOutputEnabled();
+            optionsToggleOutputButton.visible = showOptions;
+            optionsToggleOutputButton.active = showOptions;
+            optionsToggleOutputButton.setMessage(Text.literal("Set Custom Output Device: " + (enabled ? "ON" : "OFF")));
+        }
+        if (optionsSelectOutputButton != null) {
+            boolean enabled = showOptions && AudioPlayer.getInstance().isCustomOutputEnabled();
+            optionsSelectOutputButton.visible = enabled;
+            optionsSelectOutputButton.active = enabled && !availableOutputDevices.isEmpty();
+            String label = availableOutputDevices.isEmpty()
+                    ? "Output Device: (none found)"
+                    : "Output Device: " + availableOutputDevices.get(Math.max(0, selectedOutputDeviceIndex));
+            optionsSelectOutputButton.setMessage(Text.literal(label));
+        }
+        if (optionsDuckingToggleButton != null) {
+            boolean enabled = AudioPlayer.getInstance().isDuckingEnabled();
+            optionsDuckingToggleButton.visible = showOptions;
+            optionsDuckingToggleButton.active = showOptions;
+            optionsDuckingToggleButton.setMessage(Text.literal("Voice Ducking: " + (enabled ? "ON" : "OFF")));
+        }
+        if (optionsDuckingStrengthSlider != null) {
+            boolean enabled = showOptions && AudioPlayer.getInstance().isDuckingEnabled();
+            optionsDuckingStrengthSlider.visible = enabled;
+            optionsDuckingStrengthSlider.active = enabled;
+        }
+    }
+
+    private void refreshOutputDevices() {
+        availableOutputDevices = AudioPlayer.getInstance().getAvailableOutputMixers();
+        String selectedName = AudioPlayer.getInstance().getCustomOutputMixerName();
+        selectedOutputDeviceIndex = -1;
+        if (!availableOutputDevices.isEmpty()) {
+            for (int i = 0; i < availableOutputDevices.size(); i++) {
+                if (availableOutputDevices.get(i).equals(selectedName)) {
+                    selectedOutputDeviceIndex = i;
+                    break;
+                }
+            }
+            if (selectedOutputDeviceIndex < 0) {
+                selectedOutputDeviceIndex = 0;
+                if (AudioPlayer.getInstance().isCustomOutputEnabled()) {
+                    AudioPlayer.getInstance().setCustomOutputMixerName(availableOutputDevices.get(0));
+                }
+            }
         }
     }
 
@@ -2909,6 +3088,7 @@ public class MineifyScreen extends Screen {
         }
     }
 }
+
 
 
 

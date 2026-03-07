@@ -6,7 +6,9 @@ import com.mineify.network.packets.AddToUserPlaylistPacket;
 import com.mineify.network.packets.ConfirmSpotifyImportPacket;
 import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
+import com.mineify.network.packets.PlaybackLockPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
+import com.mineify.network.packets.PrefetchAudioPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.ReorderQueuePacket;
@@ -61,6 +63,14 @@ public class MineifyPackets {
         PayloadTypeRegistry.playS2C().register(
                 com.mineify.network.packets.PlayAudioPacket.ID,
                 com.mineify.network.packets.PlayAudioPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                PlaybackLockPacket.ID,
+                PlaybackLockPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                PrefetchAudioPacket.ID,
+                PrefetchAudioPacket.CODEC
         );
         PayloadTypeRegistry.playS2C().register(
                 PlaybackStatePacket.ID,

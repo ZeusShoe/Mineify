@@ -13,13 +13,19 @@ import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.Clip;
 import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.LineEvent;
+import javax.sound.sampled.Mixer;
+import javax.sound.sampled.LineUnavailableException;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.Properties;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -34,6 +40,12 @@ public class AudioPlayer {
         t.setDaemon(true);
         return t;
     });
+    private final ExecutorService prefetchExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "Mineify-Audio-Prefetch");
+        t.setDaemon(true);
+        return t;
+    });
+    private final ConcurrentHashMap<String, Boolean> prefetchInFlight = new ConcurrentHashMap<>();
 
     private volatile Clip currentClip;
     private volatile String currentDownloadUrl = null;
@@ -45,13 +57,24 @@ public class AudioPlayer {
     private volatile long pendingScheduledStartNanos = 0L;
     private volatile boolean suppressStopCallback = false;
     private volatile float volume = 0.15f;
+    private volatile boolean customOutputEnabled = false;
+    private volatile String customOutputMixerName = "";
+    private volatile boolean duckingEnabled = false;
+    private volatile boolean duckingActive = false;
+    private volatile float duckingStrength = 0.35f;
     private volatile boolean minecraftMusicSuppressed = false;
     private volatile boolean hadPreviousMinecraftMusicVolume = false;
     private volatile float previousMinecraftMusicVolume = 1.0f;
     private static final Path CLIENT_VOLUME_FILE = Path.of("config", "mineify-client.properties");
+    private static final Path CLIENT_CACHE_DIR = Path.of("config", "mineify-cache");
 
     private AudioPlayer() {
-        this.volume = loadStoredVolume();
+        ClientSettings settings = loadClientSettings();
+        this.volume = settings.volume;
+        this.customOutputEnabled = settings.customOutputEnabled;
+        this.customOutputMixerName = settings.customOutputMixerName;
+        this.duckingEnabled = settings.duckingEnabled;
+        this.duckingStrength = settings.duckingStrength;
     }
 
     public static AudioPlayer getInstance() {
@@ -61,7 +84,7 @@ public class AudioPlayer {
         return instance;
     }
 
-    public void play(String downloadUrl, String title, long serverElapsedMs, long packetReceivedAtNanos, long scheduledDelayMs, Runnable onLoaded) {
+    public void play(String downloadUrl, String title, String videoId, long serverElapsedMs, long packetReceivedAtNanos, long scheduledDelayMs, Runnable onLoaded) {
         executor.submit(() -> {
             long scheduledStartNanos = packetReceivedAtNanos + Math.max(0L, scheduledDelayMs) * 1_000_000L;
             pendingScheduledStartNanos = scheduledStartNanos;
@@ -83,10 +106,12 @@ public class AudioPlayer {
                         String sep = downloadUrl.contains("?") ? "&" : "?";
                         requestUrl = downloadUrl + sep + "retry=" + attempt + "&ts=" + System.nanoTime();
                     }
-                    MineifyClient.LOGGER.info("Downloading audio from: {} (attempt {}/{})", requestUrl, attempt, MAX_LOAD_ATTEMPTS);
-                    URL url = new URL(requestUrl);
-                    Clip clip = AudioSystem.getClip();
-                    try (InputStream raw = url.openStream();
+                    String resolvedVideoId = resolveVideoId(videoId, requestUrl);
+                    Path cachedPath = ensureCachedDownload(resolvedVideoId, requestUrl);
+                    String sourceLabel = cachedPath != null ? cachedPath.toAbsolutePath().toString() : requestUrl;
+                    MineifyClient.LOGGER.info("Loading audio from: {} (attempt {}/{})", sourceLabel, attempt, MAX_LOAD_ATTEMPTS);
+                    Clip clip = createClip();
+                    try (InputStream raw = openCachedOrRemoteStream(cachedPath, requestUrl);
                          BufferedInputStream buffered = new BufferedInputStream(raw);
                          AudioInputStream sourceAis = AudioSystem.getAudioInputStream(buffered)) {
 
@@ -198,6 +223,26 @@ public class AudioPlayer {
 
     public void resume() {
         executor.submit(this::resumeInternal);
+    }
+
+    public void prefetch(String downloadUrl, String videoId) {
+        if (downloadUrl == null || downloadUrl.isBlank()) {
+            return;
+        }
+        String resolvedVideoId = resolveVideoId(videoId, downloadUrl);
+        if (resolvedVideoId == null || resolvedVideoId.isBlank()) {
+            return;
+        }
+        if (prefetchInFlight.putIfAbsent(resolvedVideoId, Boolean.TRUE) != null) {
+            return;
+        }
+        prefetchExecutor.submit(() -> {
+            try {
+                ensureCachedDownload(resolvedVideoId, downloadUrl);
+            } finally {
+                prefetchInFlight.remove(resolvedVideoId);
+            }
+        });
     }
     private void applySeekToLoadedClip(String title, long serverElapsedMs, long scheduledStartNanos) {
         Clip clip = currentClip;
@@ -344,11 +389,71 @@ public class AudioPlayer {
 
     public void setVolume(float volume) {
         this.volume = Math.max(0.0f, Math.min(1.0f, volume));
-        saveStoredVolume(this.volume);
+        saveClientSettings();
         Clip clip = currentClip;
         if (clip != null && clip.isOpen()) {
             applyVolume(clip);
         }
+    }
+
+    public boolean isCustomOutputEnabled() {
+        return customOutputEnabled;
+    }
+
+    public String getCustomOutputMixerName() {
+        return customOutputMixerName == null ? "" : customOutputMixerName;
+    }
+
+    public void setCustomOutputEnabled(boolean enabled) {
+        this.customOutputEnabled = enabled;
+        saveClientSettings();
+    }
+
+    public void setCustomOutputMixerName(String mixerName) {
+        this.customOutputMixerName = mixerName == null ? "" : mixerName;
+        saveClientSettings();
+    }
+
+    public List<String> getAvailableOutputMixers() {
+        List<String> names = new java.util.ArrayList<>();
+        for (Mixer.Info info : AudioSystem.getMixerInfo()) {
+            try {
+                Mixer mixer = AudioSystem.getMixer(info);
+                if (mixer.isLineSupported(new javax.sound.sampled.DataLine.Info(Clip.class, null))) {
+                    names.add(info.getName());
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return names;
+    }
+
+    public boolean isDuckingEnabled() {
+        return duckingEnabled;
+    }
+
+    public float getDuckingStrength() {
+        return duckingStrength;
+    }
+
+    public void setDuckingEnabled(boolean enabled) {
+        this.duckingEnabled = enabled;
+        saveClientSettings();
+        applyDuckingState();
+    }
+
+    public void setDuckingStrength(float strength) {
+        this.duckingStrength = Math.max(0.1f, Math.min(0.9f, strength));
+        saveClientSettings();
+        applyDuckingState();
+    }
+
+    public void setDuckingActive(boolean active) {
+        if (this.duckingActive == active) {
+            return;
+        }
+        this.duckingActive = active;
+        applyDuckingState();
     }
 
     private void applyVolume(Clip clip) {
@@ -358,7 +463,8 @@ public class AudioPlayer {
     private void setClipVolume(Clip clip, float linearVolume) {
         try {
             FloatControl control = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
-            float dB = (float) (20.0 * Math.log10(Math.max(linearVolume, 0.0001)));
+            float effectiveVolume = applyDucking(linearVolume);
+            float dB = (float) (20.0 * Math.log10(Math.max(effectiveVolume, 0.0001)));
             dB = Math.max(dB, control.getMinimum());
             dB = Math.min(dB, control.getMaximum());
             control.setValue(dB);
@@ -377,10 +483,10 @@ public class AudioPlayer {
             return;
         }
         int steps = Math.max(1, Math.min(24, safeMs / 15));
-        float start = this.volume;
+        float start = applyDucking(this.volume);
         for (int i = 1; i <= steps; i++) {
             float t = i / (float) steps;
-            float v = start + (targetVolume - start) * t;
+            float v = start + (applyDucking(targetVolume) - start) * t;
             setClipVolume(clip, v);
             try {
                 Thread.sleep(Math.max(5L, safeMs / (long) steps));
@@ -395,6 +501,47 @@ public class AudioPlayer {
     public void shutdown() {
         stopInternal();
         executor.shutdownNow();
+        prefetchExecutor.shutdownNow();
+    }
+
+    private Path ensureCachedDownload(String videoId, String downloadUrl) throws IOException {
+        if (videoId == null || videoId.isBlank()) {
+            return null;
+        }
+        Files.createDirectories(CLIENT_CACHE_DIR);
+        Path target = CLIENT_CACHE_DIR.resolve(videoId + ".mp3");
+        if (Files.exists(target)) {
+            return target;
+        }
+        Path tmp = CLIENT_CACHE_DIR.resolve(videoId + ".part");
+        try (InputStream in = new URL(downloadUrl).openStream()) {
+            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+        }
+        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        return target;
+    }
+
+    private InputStream openCachedOrRemoteStream(Path cachedPath, String downloadUrl) throws IOException {
+        if (cachedPath != null && Files.exists(cachedPath)) {
+            return Files.newInputStream(cachedPath, StandardOpenOption.READ);
+        }
+        return new URL(downloadUrl).openStream();
+    }
+
+    private String resolveVideoId(String explicitVideoId, String downloadUrl) {
+        if (explicitVideoId != null && !explicitVideoId.isBlank()) {
+            return explicitVideoId;
+        }
+        if (downloadUrl == null) {
+            return "";
+        }
+        int idx = downloadUrl.lastIndexOf('/');
+        if (idx >= 0 && idx + 1 < downloadUrl.length()) {
+            String tail = downloadUrl.substring(idx + 1);
+            int q = tail.indexOf('?');
+            return q >= 0 ? tail.substring(0, q) : tail;
+        }
+        return "";
     }
 
     private void suppressMinecraftMusic() {
@@ -437,30 +584,88 @@ public class AudioPlayer {
         });
     }
 
-    private float loadStoredVolume() {
+    private ClientSettings loadClientSettings() {
+        float loadedVolume = 0.15f;
+        boolean loadedCustomOutput = false;
+        String loadedMixer = "";
+        boolean loadedDucking = false;
+        float loadedDuckingStrength = 0.35f;
         if (!Files.exists(CLIENT_VOLUME_FILE)) {
-            return 0.15f;
+            return new ClientSettings(loadedVolume, loadedCustomOutput, loadedMixer, loadedDucking, loadedDuckingStrength);
         }
         Properties props = new Properties();
         try (var in = Files.newInputStream(CLIENT_VOLUME_FILE)) {
             props.load(in);
             String raw = props.getProperty("volume", "0.15");
             float parsed = Float.parseFloat(raw);
-            return Math.max(0.0f, Math.min(1.0f, parsed));
+            loadedVolume = Math.max(0.0f, Math.min(1.0f, parsed));
+            loadedCustomOutput = Boolean.parseBoolean(props.getProperty("customOutputEnabled", "false"));
+            loadedMixer = props.getProperty("customOutputMixer", "");
+            loadedDucking = Boolean.parseBoolean(props.getProperty("duckingEnabled", "false"));
+            String duckStrength = props.getProperty("duckingStrength", "0.35");
+            loadedDuckingStrength = Math.max(0.1f, Math.min(0.9f, Float.parseFloat(duckStrength)));
         } catch (IOException | NumberFormatException ignored) {
-            return 0.15f;
         }
+        return new ClientSettings(loadedVolume, loadedCustomOutput, loadedMixer, loadedDucking, loadedDuckingStrength);
     }
 
-    private void saveStoredVolume(float value) {
+    private void saveClientSettings() {
         Properties props = new Properties();
-        props.setProperty("volume", Float.toString(value));
+        props.setProperty("volume", Float.toString(this.volume));
+        props.setProperty("customOutputEnabled", Boolean.toString(this.customOutputEnabled));
+        props.setProperty("customOutputMixer", this.customOutputMixerName == null ? "" : this.customOutputMixerName);
+        props.setProperty("duckingEnabled", Boolean.toString(this.duckingEnabled));
+        props.setProperty("duckingStrength", Float.toString(this.duckingStrength));
         try {
             Files.createDirectories(CLIENT_VOLUME_FILE.getParent());
             try (var out = Files.newOutputStream(CLIENT_VOLUME_FILE)) {
                 props.store(out, "Mineify client settings");
             }
         } catch (IOException ignored) {
+        }
+    }
+
+    private float applyDucking(float linearVolume) {
+        if (duckingEnabled && duckingActive) {
+            return Math.max(0.0f, linearVolume * (1.0f - duckingStrength));
+        }
+        return linearVolume;
+    }
+
+    private void applyDuckingState() {
+        Clip clip = currentClip;
+        if (clip != null && clip.isOpen()) {
+            applyVolume(clip);
+        }
+    }
+
+    private Clip createClip() throws LineUnavailableException {
+        if (customOutputEnabled && customOutputMixerName != null && !customOutputMixerName.isBlank()) {
+            for (Mixer.Info info : AudioSystem.getMixerInfo()) {
+                if (info.getName().equals(customOutputMixerName)) {
+                    try {
+                        return AudioSystem.getClip(info);
+                    } catch (LineUnavailableException ignored) {
+                    }
+                }
+            }
+        }
+        return AudioSystem.getClip();
+    }
+
+    private static class ClientSettings {
+        final float volume;
+        final boolean customOutputEnabled;
+        final String customOutputMixerName;
+        final boolean duckingEnabled;
+        final float duckingStrength;
+
+        ClientSettings(float volume, boolean customOutputEnabled, String customOutputMixerName, boolean duckingEnabled, float duckingStrength) {
+            this.volume = volume;
+            this.customOutputEnabled = customOutputEnabled;
+            this.customOutputMixerName = customOutputMixerName == null ? "" : customOutputMixerName;
+            this.duckingEnabled = duckingEnabled;
+            this.duckingStrength = duckingStrength;
         }
     }
 }

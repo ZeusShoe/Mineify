@@ -4,8 +4,11 @@ import com.mineify.network.MineifyPackets;
 import com.mineify.server.CompanionClient;
 import com.mineify.server.PlaylistManager;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.minecraft.server.command.CommandManager;
+import net.minecraft.text.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,6 +30,47 @@ public class Mineify implements ModInitializer {
 
         // Register network packets
         MineifyPackets.registerServerPackets();
+
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            dispatcher.register(CommandManager.literal("mineify")
+                    .then(CommandManager.literal("reload")
+                            .requires(source -> source.hasPermissionLevel(2))
+                            .executes(ctx -> {
+                                MineifyConfig.reload();
+                                companionClient = new CompanionClient(MineifyConfig.getCompanionUrl());
+                                if (playlistManager != null) {
+                                    playlistManager.setCompanionClient(companionClient);
+                                }
+                                ctx.getSource().sendFeedback(() -> Text.literal("Mineify config reloaded."), false);
+                                return 1;
+                            }))
+                    .then(CommandManager.literal("status")
+                            .requires(source -> source.hasPermissionLevel(2))
+                            .executes(ctx -> {
+                                PlaylistManager manager = Mineify.getPlaylistManager();
+                                if (manager == null) {
+                                    ctx.getSource().sendFeedback(() -> Text.literal("Mineify is not initialized."), false);
+                                    return 0;
+                                }
+                                PlaylistManager.PlaylistStatus status = manager.getStatus();
+                                ctx.getSource().sendFeedback(() -> Text.literal(
+                                        "Mineify status: playing=" + status.playing()
+                                                + ", paused=" + status.paused()
+                                                + ", waitingForReady=" + status.waitingForReady()
+                                                + ", queueSize=" + status.queueSize()
+                                                + ", nowPlaying=\"" + status.nowPlayingTitle() + "\""
+                                ), false);
+                                return 1;
+                            }))
+                    .then(CommandManager.literal("perms")
+                            .requires(source -> source.hasPermissionLevel(2))
+                            .executes(ctx -> {
+                                String perms = String.join(", ", PlaylistManager.getPermissionNodes());
+                                ctx.getSource().sendFeedback(() -> Text.literal("Mineify permission nodes: " + perms), false);
+                                return 1;
+                            }))
+            );
+        });
 
         // Server lifecycle events
         ServerLifecycleEvents.SERVER_STARTING.register(server -> {
