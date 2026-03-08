@@ -1,6 +1,6 @@
-# CLAUDE.md - Mineify Project Context
+# AGENTS.md - Mineify Project Context
 
-This file provides context for AI assistants (like Claude Code) working on the Mineify project.
+This file provides context for AI assistants (like Codex) working on the Mineify project.
 
 ## Project Overview
 
@@ -64,7 +64,7 @@ npm start                    # Start server
 npm run dev                  # Start with hot reload
 ```
 
-## Common Tasks for Claude Code
+## Common Tasks for Codex
 
 ### Adding a New Packet Type
 1. Create packet record in `network/packets/`
