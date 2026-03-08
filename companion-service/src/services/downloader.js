@@ -5,10 +5,33 @@ import fs from 'fs';
 
 const execFileAsync = promisify(execFile);
 const inFlightDownloads = new Map();
+const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
+
+export function isValidYouTubeVideoId(videoId) {
+    return typeof videoId === 'string' && YOUTUBE_VIDEO_ID_REGEX.test(videoId);
+}
+
+function requireValidVideoId(videoId) {
+    if (!isValidYouTubeVideoId(videoId)) {
+        throw new Error('Invalid videoId format');
+    }
+}
+
+function resolveSafeDownloadPath(downloadDir, videoId, suffix = '.wav') {
+    const safeDir = path.resolve(downloadDir);
+    const filePath = path.resolve(path.join(safeDir, `${videoId}${suffix}`));
+    const relative = path.relative(safeDir, filePath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        throw new Error('Unsafe download path');
+    }
+    return filePath;
+}
 
 export async function downloadAsWav(videoId, downloadDir) {
-    const outputPath = path.join(downloadDir, `${videoId}.wav`);
-    fs.mkdirSync(downloadDir, { recursive: true });
+    requireValidVideoId(videoId);
+    const outputPath = resolveSafeDownloadPath(downloadDir, videoId, '.wav');
+    const tmpPath = resolveSafeDownloadPath(downloadDir, videoId, '.part.wav');
+    fs.mkdirSync(path.resolve(downloadDir), { recursive: true });
 
     // Return immediately if already downloaded
     if (fs.existsSync(outputPath)) {
@@ -21,7 +44,6 @@ export async function downloadAsWav(videoId, downloadDir) {
         return inFlightDownloads.get(videoId);
     }
 
-    const tmpPath = path.join(downloadDir, `${videoId}.part.wav`);
     const promise = execFileAsync('yt-dlp', [
         '-x',
         '--audio-format', 'wav',
@@ -48,7 +70,10 @@ export async function downloadAsWav(videoId, downloadDir) {
 }
 
 export function deleteDownload(videoId, downloadDir) {
-    const filePath = path.join(downloadDir, `${videoId}.wav`);
+    if (!isValidYouTubeVideoId(videoId)) {
+        return false;
+    }
+    const filePath = resolveSafeDownloadPath(downloadDir, videoId, '.wav');
     if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
         return true;

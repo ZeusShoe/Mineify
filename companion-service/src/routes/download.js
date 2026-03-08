@@ -1,16 +1,34 @@
 import { Router } from 'express';
-import { downloadAsWav, deleteDownload } from '../services/downloader.js';
+import { downloadAsWav, deleteDownload, isValidYouTubeVideoId } from '../services/downloader.js';
 import path from 'path';
 import fs from 'fs';
 
 const router = Router();
+const DOWNLOAD_FILE_EXT = '.wav';
 
-// POST /api/download — trigger download, return metadata
+function validateVideoIdParam(videoId) {
+    return typeof videoId === 'string' && isValidYouTubeVideoId(videoId);
+}
+
+function resolveSafeDownloadFilePath(downloadDir, videoId) {
+    const safeDir = path.resolve(downloadDir);
+    const filePath = path.resolve(path.join(safeDir, `${videoId}${DOWNLOAD_FILE_EXT}`));
+    const relative = path.relative(safeDir, filePath);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        return null;
+    }
+    return filePath;
+}
+
+// POST /api/download - trigger download, return metadata
 router.post('/', async (req, res, next) => {
     try {
         const { videoId } = req.body;
         if (!videoId) {
             return res.status(400).json({ error: 'Missing videoId' });
+        }
+        if (!validateVideoIdParam(videoId)) {
+            return res.status(400).json({ error: 'Invalid videoId format' });
         }
         const downloadDir = process.env.DOWNLOAD_DIR || './downloads';
         await downloadAsWav(videoId, downloadDir);
@@ -23,10 +41,16 @@ router.post('/', async (req, res, next) => {
     }
 });
 
-// GET /api/download/:videoId — serve the WAV file
+// GET /api/download/:videoId - serve the WAV file
 router.get('/:videoId', (req, res) => {
+    if (!validateVideoIdParam(req.params.videoId)) {
+        return res.status(400).json({ error: 'Invalid videoId format' });
+    }
     const downloadDir = process.env.DOWNLOAD_DIR || './downloads';
-    const filePath = path.resolve(path.join(downloadDir, `${req.params.videoId}.wav`));
+    const filePath = resolveSafeDownloadFilePath(downloadDir, req.params.videoId);
+    if (!filePath) {
+        return res.status(400).json({ error: 'Invalid videoId format' });
+    }
     if (!fs.existsSync(filePath)) {
         return res.status(404).json({ error: 'File not found' });
     }
@@ -34,8 +58,11 @@ router.get('/:videoId', (req, res) => {
     res.sendFile(filePath);
 });
 
-// DELETE /api/download/:videoId — delete the downloaded file
+// DELETE /api/download/:videoId - delete the downloaded file
 router.delete('/:videoId', (req, res) => {
+    if (!validateVideoIdParam(req.params.videoId)) {
+        return res.status(400).json({ error: 'Invalid videoId format' });
+    }
     const downloadDir = process.env.DOWNLOAD_DIR || './downloads';
     const deleted = deleteDownload(req.params.videoId, downloadDir);
     if (deleted) {

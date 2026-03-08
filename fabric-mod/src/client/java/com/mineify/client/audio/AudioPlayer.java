@@ -952,6 +952,7 @@ public class AudioPlayer {
             playing = true;
             paused = false;
             currentTitle = state.title;
+            int frameSize = Math.max(1, state.format.getFrameSize());
             while (true) {
                 byte[] data = state.queue.take();
                 if (data == StreamState.END_SENTINEL) {
@@ -959,7 +960,14 @@ public class AudioPlayer {
                 }
                 if (state.bytesToSkip > 0) {
                     int skipNow = (int) Math.min(state.bytesToSkip, data.length);
+                    if (frameSize > 1) {
+                        skipNow -= (skipNow % frameSize);
+                    }
                     state.bytesToSkip -= skipNow;
+                    if (state.bytesToSkip > 0 && state.bytesToSkip < frameSize) {
+                        // Sub-frame seeking is not possible for PCM writes; drop remainder.
+                        state.bytesToSkip = 0;
+                    }
                     if (skipNow == data.length) {
                         continue;
                     }
@@ -967,11 +975,34 @@ public class AudioPlayer {
                     System.arraycopy(data, skipNow, remaining, 0, remaining.length);
                     data = remaining;
                 }
+
+                if (state.pendingFrameBytes.length > 0) {
+                    byte[] merged = new byte[state.pendingFrameBytes.length + data.length];
+                    System.arraycopy(state.pendingFrameBytes, 0, merged, 0, state.pendingFrameBytes.length);
+                    System.arraycopy(data, 0, merged, state.pendingFrameBytes.length, data.length);
+                    data = merged;
+                    state.pendingFrameBytes = new byte[0];
+                }
+
+                int writableLen = data.length;
+                if (frameSize > 1) {
+                    writableLen -= (writableLen % frameSize);
+                }
+                if (writableLen <= 0) {
+                    state.pendingFrameBytes = data;
+                    continue;
+                }
+                if (writableLen < data.length) {
+                    int pendingLen = data.length - writableLen;
+                    byte[] pending = new byte[pendingLen];
+                    System.arraycopy(data, writableLen, pending, 0, pendingLen);
+                    state.pendingFrameBytes = pending;
+                }
                 while (state.paused) {
                     Thread.sleep(10L);
                 }
                 if (state.line != null) {
-                    int written = state.line.write(data, 0, data.length);
+                    int written = state.line.write(data, 0, writableLen);
                     state.bytesWritten += written;
                 }
             }
@@ -1061,6 +1092,7 @@ public class AudioPlayer {
         volatile long progressBaseMs = 0L;
         volatile long dataSize = 0L;
         volatile long bytesReceived = 0L;
+        volatile byte[] pendingFrameBytes = new byte[0];
         Thread writer;
 
         StreamState(long streamId, String videoId, String title, AudioFormat format, SourceDataLine line, long durationMs) {
