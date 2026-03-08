@@ -138,6 +138,7 @@ public class PlaylistManager {
     private String currentDownloadUrl = null;
     private StreamSession currentStream;
     private long streamIdCounter = 0L;
+    private long seekRequestNonce = 0L;
     private long playbackRequestNonce = 0L;
     private long waitingReadyNonce = -1L;
     private String waitingReadyVideoId = null;
@@ -427,16 +428,22 @@ public class PlaylistManager {
             return;
         }
         long clampedMs = Math.max(0, Math.min(requestedMs, Math.max(0, currentTrackDurationMs)));
+        long seekNonce = ++seekRequestNonce;
         long scheduledDelayMs = 0L;
+        PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
+
         if (paused) {
             pausedElapsedMs = clampedMs;
+            // While paused, do not start new audio playback. Keep seek target only.
+            stopStream();
+            broadcastNowPlaying(entry.title(), clampedMs);
+            return;
         } else {
             playbackStartNanos = System.nanoTime() + (scheduledDelayMs * 1_000_000L) - (clampedMs * 1_000_000L);
         }
 
-        PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
         stopStream();
-        restartStreamFromOffset(entry, clampedMs);
+        restartStreamFromOffset(entry, clampedMs, seekNonce);
         broadcastNowPlaying(entry.title(), clampedMs);
         scheduleAdvanceFromCurrentState();
     }
@@ -1059,16 +1066,33 @@ public class PlaylistManager {
     }
 
     private void restartStreamFromOffset(PlaylistSyncPacket.Entry entry, long offsetMs) {
+        restartStreamFromOffset(entry, offsetMs, -1L);
+    }
+
+    private void restartStreamFromOffset(PlaylistSyncPacket.Entry entry, long offsetMs, long expectedSeekNonce) {
         if (currentDownloadUrl == null) {
             return;
         }
         streamExecutor.submit(() -> {
+            if (expectedSeekNonce >= 0L && expectedSeekNonce != seekRequestNonce) {
+                return;
+            }
             try {
                 StreamSession session = openWavStream(currentDownloadUrl, entry.videoId(), entry.title(), offsetMs);
                 if (session == null) {
                     return;
                 }
+                if (expectedSeekNonce >= 0L && expectedSeekNonce != seekRequestNonce) {
+                    session.cancelled = true;
+                    session.close();
+                    return;
+                }
                 server.execute(() -> {
+                    if (expectedSeekNonce >= 0L && expectedSeekNonce != seekRequestNonce) {
+                        session.cancelled = true;
+                        session.close();
+                        return;
+                    }
                     currentStream = session;
                     sendStreamStart(entry, offsetMs, 0L, true);
                     streamExecutor.submit(() -> streamToPlayers(session.streamId, entry, session));
@@ -1126,10 +1150,13 @@ public class PlaylistManager {
         int sequence = 0;
         byte[] buffer = new byte[64 * 1024];
         try (InputStream in = session.inputStream) {
-            int read;
-            while ((read = in.read(buffer)) >= 0) {
+            while (true) {
                 if (session.streamId != streamId || session.cancelled) {
                     return;
+                }
+                int read = in.read(buffer);
+                if (read < 0) {
+                    break;
                 }
                 byte[] chunk = java.util.Arrays.copyOf(buffer, read);
                 AudioStreamChunkPacket packet = new AudioStreamChunkPacket(streamId, sequence++, chunk, false);
@@ -1140,8 +1167,13 @@ public class PlaylistManager {
                 });
             }
         } catch (IOException e) {
-            Mineify.LOGGER.error("Stream failed for {}", entry.title(), e);
+            if (!(session.cancelled || session.streamId != streamId || currentStream != session)) {
+                Mineify.LOGGER.error("Stream failed for {}", entry.title(), e);
+            }
         } finally {
+            if (session.cancelled || session.streamId != streamId || currentStream != session) {
+                return;
+            }
             server.execute(() -> {
                 AudioStreamEndPacket endPacket = new AudioStreamEndPacket(streamId);
                 for (ServerPlayerEntity p : targets) {
@@ -1372,8 +1404,6 @@ public class PlaylistManager {
 
         pausedElapsedMs = getElapsedPlaybackMs();
         paused = true;
-        stopStream();
-        playbackRequestNonce++;
         cancelAdvanceSchedule();
         broadcastPlaybackState(true);
         broadcastNowPlaying(playlist.get(currentIndex).title(), pausedElapsedMs);
@@ -1386,10 +1416,12 @@ public class PlaylistManager {
 
         playbackStartNanos = System.nanoTime() - (pausedElapsedMs * 1_000_000L);
         paused = false;
-        playbackRequestNonce++;
         broadcastPlaybackState(false);
         broadcastNowPlaying(playlist.get(currentIndex).title(), getElapsedPlaybackMs());
-        restartStreamFromOffset(playlist.get(currentIndex), pausedElapsedMs);
+        if (currentStream == null || currentStream.cancelled) {
+            // Fallback: if no live stream exists, recover by restarting from paused offset.
+            restartStreamFromOffset(playlist.get(currentIndex), pausedElapsedMs);
+        }
         scheduleAdvanceFromCurrentState();
     }
 
