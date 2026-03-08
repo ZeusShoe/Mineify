@@ -239,6 +239,8 @@ public class AudioPlayer {
         prefetchExecutor.submit(() -> {
             try {
                 ensureCachedDownload(resolvedVideoId, downloadUrl);
+            } catch (IOException e) {
+                MineifyClient.LOGGER.warn("Prefetch failed for {}: {}", resolvedVideoId, e.toString());
             } finally {
                 prefetchInFlight.remove(resolvedVideoId);
             }
