@@ -47,10 +47,6 @@ public class MineifyConfig {
     private static boolean metricsEnabled = false;
     private static int metricsLogIntervalSeconds = 300;
 
-    static {
-        load();
-    }
-
     private static void load() {
         Path tomlPath = Path.of("config", "mineify.toml");
         Path jsonPath = Path.of("config", "mineify.json");
@@ -136,6 +132,10 @@ public class MineifyConfig {
             "logIntervalSeconds = 300",
             ""
     );
+
+    static {
+        load();
+    }
 
     private static boolean loadFromToml(Path configPath) {
         try {

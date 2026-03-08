@@ -5,7 +5,7 @@
 configVersion = 2
 
 # Base URL for the MineifyCompanion service.
-companionServiceUrl = "https://mineify-api.cuboidal.net"
+companionServiceUrl = "http://localhost:3001"
 
 # Maximum number of tracks allowed in the server queue.
 maxPlaylistSize = 50
