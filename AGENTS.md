@@ -99,7 +99,7 @@ npm run dev                  # Start with hot reload
 
 ## Tech Stack
 
-- **Mod**: Fabric 0.17+, Minecraft 1.21.4, Java 21
+- **Mod**: Fabric 0.17+, Minecraft 1.21.11, Java 21
 - **Service**: Node.js 18+, Express, youtube-search-api, yt-dlp
 - **Protocol**: Custom Minecraft packets (Fabric networking API)
 

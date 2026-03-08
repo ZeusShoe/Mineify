@@ -1171,6 +1171,10 @@ public class PlaylistManager {
         }
         if (startOffsetMs > 0) {
             long bytesToSkip = Math.round(startOffsetMs * info.bytesPerMs());
+            int frameSize = Math.max(1, info.blockAlign);
+            bytesToSkip -= (bytesToSkip % frameSize);
+            long maxSkippable = Math.max(0L, info.dataSize - frameSize);
+            bytesToSkip = Math.min(bytesToSkip, maxSkippable);
             skipFully(inputStream, bytesToSkip);
         }
         return new StreamSession(streamId, videoId, title, downloadUrl, inputStream, info);
@@ -1189,6 +1193,8 @@ public class PlaylistManager {
         int channels = 0;
         int sampleRate = 0;
         int bitsPerSample = 16;
+        int blockAlign = 0;
+        int byteRate = 0;
         long dataSize = -1;
         while (true) {
             String chunkId = readAscii(in, 4);
@@ -1197,8 +1203,8 @@ public class PlaylistManager {
                 int audioFormat = readLittleShort(in);
                 channels = readLittleShort(in);
                 sampleRate = readLittleInt(in);
-                readLittleInt(in);
-                readLittleShort(in);
+                byteRate = readLittleInt(in);
+                blockAlign = readLittleShort(in);
                 bitsPerSample = readLittleShort(in);
                 int remaining = chunkSize - 16;
                 if (remaining > 0) {
@@ -1213,11 +1219,20 @@ public class PlaylistManager {
             } else {
                 skipFully(in, chunkSize);
             }
+            if ((chunkSize & 1) != 0) {
+                skipFully(in, 1);
+            }
         }
         if (channels <= 0 || sampleRate <= 0 || dataSize < 0) {
             return null;
         }
-        return new WavInfo(sampleRate, channels, bitsPerSample, dataSize);
+        if (blockAlign <= 0) {
+            blockAlign = Math.max(1, channels * Math.max(1, bitsPerSample / 8));
+        }
+        if (byteRate <= 0) {
+            byteRate = sampleRate * blockAlign;
+        }
+        return new WavInfo(sampleRate, channels, bitsPerSample, blockAlign, byteRate, dataSize);
     }
 
     private String readAscii(InputStream in, int len) throws IOException {
@@ -1465,17 +1480,21 @@ public class PlaylistManager {
         final int sampleRate;
         final int channels;
         final int bitsPerSample;
+        final int blockAlign;
+        final int byteRate;
         final long dataSize;
 
-        WavInfo(int sampleRate, int channels, int bitsPerSample, long dataSize) {
+        WavInfo(int sampleRate, int channels, int bitsPerSample, int blockAlign, int byteRate, long dataSize) {
             this.sampleRate = sampleRate;
             this.channels = channels;
             this.bitsPerSample = bitsPerSample;
+            this.blockAlign = Math.max(1, blockAlign);
+            this.byteRate = Math.max(1, byteRate);
             this.dataSize = dataSize;
         }
 
         double bytesPerMs() {
-            return (sampleRate * (double) channels * (bitsPerSample / 8.0)) / 1000.0;
+            return byteRate / 1000.0;
         }
     }
 
