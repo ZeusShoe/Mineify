@@ -4,6 +4,9 @@ import com.mineify.client.MineifyKeybinds;
 import com.mineify.client.MineifyScreen;
 import com.mineify.client.VoiceDuckingDetector;
 import com.mineify.client.audio.AudioPlayer;
+import com.mineify.network.packets.AudioStreamChunkPacket;
+import com.mineify.network.packets.AudioStreamEndPacket;
+import com.mineify.network.packets.AudioStreamStartPacket;
 import com.mineify.network.packets.NowPlayingPacket;
 import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackLockPacket;
@@ -322,8 +325,11 @@ public class MineifyClient implements ClientModInitializer {
         ClientPlayNetworking.registerGlobalReceiver(PlayAudioPacket.ID, (payload, context) -> {
             long packetReceivedAtNanos = System.nanoTime();
             context.client().execute(() -> {
-                LOGGER.info("Received play audio: {} ({}) with server elapsed {} ms",
-                        payload.title(), payload.downloadUrl(), payload.serverElapsedMs());
+                String phase = (payload.serverElapsedMs() <= 0 && payload.scheduledDelayMs() <= 0)
+                        ? "preload"
+                        : "start";
+                LOGGER.info("Received play audio [{}]: {} ({}) elapsed={}ms delay={}ms",
+                        phase, payload.title(), payload.downloadUrl(), payload.serverElapsedMs(), payload.scheduledDelayMs());
                 AudioPlayer.getInstance().play(
                         payload.downloadUrl(),
                         payload.title(),
@@ -335,6 +341,31 @@ public class MineifyClient implements ClientModInitializer {
                                 ClientPlayNetworking.send(new com.mineify.network.packets.PlaybackControlPacket("ready:" + payload.videoId()))
                         )
                 );
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(AudioStreamStartPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                LOGGER.info("Received audio stream start: {} streamId={} preloadOnly={} delay={}ms",
+                        payload.title(), payload.streamId(), payload.preloadOnly(), payload.scheduledDelayMs());
+                AudioPlayer.getInstance().handleStreamStart(
+                        payload,
+                        () -> MinecraftClient.getInstance().execute(() ->
+                                ClientPlayNetworking.send(new com.mineify.network.packets.PlaybackControlPacket("ready:" + payload.videoId()))
+                        )
+                );
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(AudioStreamChunkPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                AudioPlayer.getInstance().handleStreamChunk(payload);
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(AudioStreamEndPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                AudioPlayer.getInstance().handleStreamEnd(payload);
             });
         });
 

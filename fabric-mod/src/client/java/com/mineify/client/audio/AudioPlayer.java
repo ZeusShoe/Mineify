@@ -2,6 +2,9 @@ package com.mineify.client.audio;
 
 import com.mineify.MineifyClient;
 import com.mineify.MineifyConfig;
+import com.mineify.network.packets.AudioStreamChunkPacket;
+import com.mineify.network.packets.AudioStreamEndPacket;
+import com.mineify.network.packets.AudioStreamStartPacket;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import net.minecraft.client.MinecraftClient;
@@ -11,10 +14,12 @@ import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioInputStream;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.Clip;
+import javax.sound.sampled.DataLine;
 import javax.sound.sampled.FloatControl;
 import javax.sound.sampled.LineEvent;
 import javax.sound.sampled.Mixer;
 import javax.sound.sampled.LineUnavailableException;
+import javax.sound.sampled.SourceDataLine;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,9 +30,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Properties;
 import java.util.List;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 
 @Environment(EnvType.CLIENT)
 public class AudioPlayer {
@@ -46,6 +53,9 @@ public class AudioPlayer {
         return t;
     });
     private final ConcurrentHashMap<String, Boolean> prefetchInFlight = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> preloadedVideoIds = new ConcurrentHashMap<>();
+    private final Object streamLock = new Object();
+    private volatile StreamState currentStream;
 
     private volatile Clip currentClip;
     private volatile String currentDownloadUrl = null;
@@ -86,10 +96,52 @@ public class AudioPlayer {
 
     public void play(String downloadUrl, String title, String videoId, long serverElapsedMs, long packetReceivedAtNanos, long scheduledDelayMs, Runnable onLoaded) {
         executor.submit(() -> {
+            stopStreamInternal();
             long scheduledStartNanos = packetReceivedAtNanos + Math.max(0L, scheduledDelayMs) * 1_000_000L;
             pendingScheduledStartNanos = scheduledStartNanos;
+            // Preload-only packet: cache and acknowledge, but don't open audio yet.
+            if (scheduledDelayMs <= 0L && serverElapsedMs <= 0L) {
+                try {
+                    String resolvedVideoId = resolveVideoId(videoId, downloadUrl);
+                    Path cached = ensureCachedDownload(resolvedVideoId, downloadUrl);
+                    if (cached != null && Files.exists(cached)) {
+                        try {
+                            long size = Files.size(cached);
+                            if (size > 0 && resolvedVideoId != null && !resolvedVideoId.isBlank()) {
+                                preloadedVideoIds.put(resolvedVideoId, Boolean.TRUE);
+                            } else {
+                                MineifyClient.LOGGER.warn("Preload cache empty for {} (size={})", resolvedVideoId, size);
+                            }
+                        } catch (IOException ignored) {
+                        }
+                    } else {
+                        MineifyClient.LOGGER.warn("Preload cache missing for {}", resolvedVideoId);
+                    }
+                } catch (Exception e) {
+                    MineifyClient.LOGGER.warn("Preload cache failed for {}: {}", videoId, e.toString());
+                }
+                if (onLoaded != null) {
+                    try {
+                        onLoaded.run();
+                        MineifyClient.LOGGER.info("Sent ready for {}", videoId);
+                    } catch (Exception callbackError) {
+                        MineifyClient.LOGGER.warn("onLoaded callback failed: {}", callbackError.toString());
+                    }
+                }
+                return;
+            }
             // Seek updates reuse the loaded clip to avoid re-downloading and audio gaps.
             if (currentClip != null && currentClip.isOpen() && downloadUrl != null && downloadUrl.equals(currentDownloadUrl)) {
+                // A follow-up PlayAudio packet for the same track (start after ready/seek).
+                // If the server provides a scheduled delay, treat it as a start command.
+                String resolvedId = resolveVideoId(videoId, downloadUrl);
+                if (scheduledDelayMs > 0L || (resolvedId != null && preloadedVideoIds.containsKey(resolvedId))) {
+                    pendingPause = false;
+                    pendingResume = false;
+                    if (resolvedId != null) {
+                        preloadedVideoIds.remove(resolvedId);
+                    }
+                }
                 applySeekToLoadedClip(title, serverElapsedMs, scheduledStartNanos);
                 return;
             }
@@ -108,32 +160,68 @@ public class AudioPlayer {
                     }
                     String resolvedVideoId = resolveVideoId(videoId, requestUrl);
                     Path cachedPath = ensureCachedDownload(resolvedVideoId, requestUrl);
+                    if (resolvedVideoId != null && !resolvedVideoId.isBlank()) {
+                        preloadedVideoIds.remove(resolvedVideoId);
+                    }
+                    boolean readySent = false;
+                    if (onLoaded != null) {
+                        try {
+                            onLoaded.run();
+                            readySent = true;
+                            MineifyClient.LOGGER.info("Sent ready for {}", resolvedVideoId);
+                        } catch (Exception callbackError) {
+                            MineifyClient.LOGGER.warn("onLoaded callback failed: {}", callbackError.toString());
+                        }
+                    }
                     String sourceLabel = cachedPath != null ? cachedPath.toAbsolutePath().toString() : requestUrl;
                     MineifyClient.LOGGER.info("Loading audio from: {} (attempt {}/{})", sourceLabel, attempt, MAX_LOAD_ATTEMPTS);
                     Clip clip = createClip();
-                    try (InputStream raw = openCachedOrRemoteStream(cachedPath, requestUrl);
-                         BufferedInputStream buffered = new BufferedInputStream(raw);
-                         AudioInputStream sourceAis = AudioSystem.getAudioInputStream(buffered)) {
+                    if (cachedPath != null && Files.exists(cachedPath)) {
+                        try (AudioInputStream sourceAis = AudioSystem.getAudioInputStream(cachedPath.toFile())) {
+                            AudioFormat baseFormat = sourceAis.getFormat();
+                            AudioFormat playFormat = new AudioFormat(
+                                    AudioFormat.Encoding.PCM_SIGNED,
+                                    baseFormat.getSampleRate(),
+                                    16,
+                                    baseFormat.getChannels(),
+                                    baseFormat.getChannels() * 2,
+                                    baseFormat.getSampleRate(),
+                                    false
+                            );
 
-                        AudioFormat baseFormat = sourceAis.getFormat();
-                        AudioFormat playFormat = new AudioFormat(
-                                AudioFormat.Encoding.PCM_SIGNED,
-                                baseFormat.getSampleRate(),
-                                16,
-                                baseFormat.getChannels(),
-                                baseFormat.getChannels() * 2,
-                                baseFormat.getSampleRate(),
-                                false
-                        );
-
-                        if (!baseFormat.matches(playFormat)) {
-                            try (AudioInputStream convertedAis = AudioSystem.getAudioInputStream(playFormat, sourceAis)) {
-                                clip.open(convertedAis);
+                            if (!baseFormat.matches(playFormat)) {
+                                try (AudioInputStream convertedAis = AudioSystem.getAudioInputStream(playFormat, sourceAis)) {
+                                    clip.open(convertedAis);
+                                }
+                            } else {
+                                clip.open(sourceAis);
                             }
-                        } else {
-                            clip.open(sourceAis);
+                        }
+                    } else {
+                        try (InputStream raw = new BufferedInputStream(new URL(requestUrl).openStream());
+                             AudioInputStream sourceAis = AudioSystem.getAudioInputStream(raw)) {
+
+                            AudioFormat baseFormat = sourceAis.getFormat();
+                            AudioFormat playFormat = new AudioFormat(
+                                    AudioFormat.Encoding.PCM_SIGNED,
+                                    baseFormat.getSampleRate(),
+                                    16,
+                                    baseFormat.getChannels(),
+                                    baseFormat.getChannels() * 2,
+                                    baseFormat.getSampleRate(),
+                                    false
+                            );
+
+                            if (!baseFormat.matches(playFormat)) {
+                                try (AudioInputStream convertedAis = AudioSystem.getAudioInputStream(playFormat, sourceAis)) {
+                                    clip.open(convertedAis);
+                                }
+                            } else {
+                                clip.open(sourceAis);
+                            }
                         }
                     }
+                    MineifyClient.LOGGER.info("Opened clip for '{}' length={}ms", title, clip.getMicrosecondLength() / 1000);
                     clip.addLineListener(event -> {
                         if (event.getType() == LineEvent.Type.STOP && playing) {
                             if (suppressStopCallback) {
@@ -153,7 +241,7 @@ public class AudioPlayer {
                     playing = false;
                     paused = false;
                     setClipVolume(clip, 0.0f);
-                    if (onLoaded != null) {
+                    if (onLoaded != null && !readySent) {
                         try {
                             onLoaded.run();
                         } catch (Exception callbackError) {
@@ -213,6 +301,81 @@ public class AudioPlayer {
         });
     }
 
+    public void handleStreamStart(AudioStreamStartPacket payload, Runnable onReady) {
+        executor.submit(() -> {
+            if (payload == null) {
+                return;
+            }
+            stopClipInternal();
+            if (currentStream != null && currentStream.streamId != payload.streamId()) {
+                stopStreamInternal();
+            }
+            StreamState state;
+            synchronized (streamLock) {
+                if (currentStream != null && currentStream.streamId == payload.streamId()) {
+                    state = currentStream;
+                } else {
+                    stopStreamInternal();
+                    state = createStreamState(payload);
+                    currentStream = state;
+                }
+            }
+            if (state == null) {
+                return;
+            }
+            state.dataSize = payload.dataSize();
+            state.bytesReceived = 0L;
+            if (payload.preloadOnly()) {
+                if (onReady != null) {
+                    try {
+                        onReady.run();
+                        MineifyClient.LOGGER.info("Sent ready for {}", payload.videoId());
+                    } catch (Exception ignored) {
+                    }
+                }
+                return;
+            }
+            state.scheduledStartNanos = System.nanoTime() + Math.max(0L, payload.scheduledDelayMs()) * 1_000_000L;
+            state.startOffsetMs = Math.max(0L, payload.startOffsetMs());
+            state.serverSkipped = payload.serverSkipped();
+            state.progressBaseMs = state.startOffsetMs;
+            if (!state.serverSkipped) {
+                state.bytesToSkip = state.startOffsetMs * state.bytesPerMs;
+            } else {
+                state.bytesToSkip = 0L;
+            }
+            state.title = payload.title();
+            state.videoId = payload.videoId();
+            startStreamWriter(state);
+        });
+    }
+
+    public void handleStreamChunk(AudioStreamChunkPacket payload) {
+        if (payload == null) {
+            return;
+        }
+        StreamState state = currentStream;
+        if (state == null || state.streamId != payload.streamId()) {
+            return;
+        }
+        state.bytesReceived += payload.data().length;
+        state.queue.offer(payload.data());
+        if (payload.last()) {
+            state.queue.offer(StreamState.END_SENTINEL);
+        }
+    }
+
+    public void handleStreamEnd(AudioStreamEndPacket payload) {
+        if (payload == null) {
+            return;
+        }
+        StreamState state = currentStream;
+        if (state == null || state.streamId != payload.streamId()) {
+            return;
+        }
+        state.queue.offer(StreamState.END_SENTINEL);
+    }
+
     public void stop() {
         executor.submit(this::stopInternal);
     }
@@ -239,6 +402,9 @@ public class AudioPlayer {
         prefetchExecutor.submit(() -> {
             try {
                 ensureCachedDownload(resolvedVideoId, downloadUrl);
+                if (resolvedVideoId != null && !resolvedVideoId.isBlank()) {
+                    preloadedVideoIds.put(resolvedVideoId, Boolean.TRUE);
+                }
             } catch (IOException e) {
                 MineifyClient.LOGGER.warn("Prefetch failed for {}: {}", resolvedVideoId, e.toString());
             } finally {
@@ -305,6 +471,13 @@ public class AudioPlayer {
         pendingPause = true;
         pendingResume = false;
         pendingScheduledStartNanos = 0L;
+        StreamState stream = currentStream;
+        if (stream != null) {
+            stream.paused = true;
+            if (stream.line != null) {
+                stream.line.stop();
+            }
+        }
         Clip clip = currentClip;
         if (clip != null && clip.isOpen() && clip.isRunning()) {
             fadeToVolume(clip, 0.0f, Math.min(250, MineifyConfig.getPlaybackCrossfadeMs()));
@@ -318,6 +491,13 @@ public class AudioPlayer {
 
     private void resumeInternal() {
         pendingPause = false;
+        StreamState stream = currentStream;
+        if (stream != null) {
+            stream.paused = false;
+            if (stream.line != null && stream.started) {
+                stream.line.start();
+            }
+        }
         Clip clip = currentClip;
         if (clip == null || !clip.isOpen()) {
             pendingResume = true;
@@ -347,13 +527,8 @@ public class AudioPlayer {
         paused = false;
         currentTitle = "";
         currentDownloadUrl = null;
-        Clip clip = currentClip;
-        if (clip != null) {
-            suppressStopCallback = true;
-            clip.stop();
-            clip.close();
-            currentClip = null;
-        }
+        stopStreamInternal();
+        stopClipInternal();
         restoreMinecraftMusic();
     }
 
@@ -363,6 +538,16 @@ public class AudioPlayer {
             fadeToVolume(clip, 0.0f, MineifyConfig.getPlaybackCrossfadeMs());
         }
         stopInternal();
+    }
+
+    private void stopClipInternal() {
+        Clip clip = currentClip;
+        if (clip != null) {
+            suppressStopCallback = true;
+            clip.stop();
+            clip.close();
+            currentClip = null;
+        }
     }
 
     public boolean isPlaying() {
@@ -378,11 +563,25 @@ public class AudioPlayer {
     }
 
     public float getProgress() {
+        StreamState stream = currentStream;
+        if (stream != null && stream.durationMs > 0) {
+            long playedMs = Math.max(0L, Math.round(stream.bytesWritten / stream.bytesPerMs));
+            long elapsedMs = stream.progressBaseMs + playedMs;
+            return Math.min(1f, elapsedMs / (float) stream.durationMs);
+        }
         Clip clip = currentClip;
         if (clip != null && clip.getMicrosecondLength() > 0) {
             return (float) clip.getMicrosecondPosition() / clip.getMicrosecondLength();
         }
         return 0f;
+    }
+
+    public float getBufferedProgress() {
+        StreamState stream = currentStream;
+        if (stream != null && stream.dataSize > 0) {
+            return Math.min(1f, stream.bytesReceived / (float) stream.dataSize);
+        }
+        return 1f;
     }
 
     public float getVolume() {
@@ -395,6 +594,10 @@ public class AudioPlayer {
         Clip clip = currentClip;
         if (clip != null && clip.isOpen()) {
             applyVolume(clip);
+        }
+        StreamState stream = currentStream;
+        if (stream != null && stream.line != null) {
+            applyVolume(stream.line);
         }
     }
 
@@ -421,8 +624,17 @@ public class AudioPlayer {
         for (Mixer.Info info : AudioSystem.getMixerInfo()) {
             try {
                 Mixer mixer = AudioSystem.getMixer(info);
-                if (mixer.isLineSupported(new javax.sound.sampled.DataLine.Info(Clip.class, null))) {
+                boolean supportsClip = mixer.isLineSupported(new javax.sound.sampled.DataLine.Info(Clip.class, null));
+                boolean supportsSource = mixer.isLineSupported(new javax.sound.sampled.DataLine.Info(javax.sound.sampled.SourceDataLine.class, null));
+                if (supportsClip || supportsSource) {
                     names.add(info.getName());
+                    continue;
+                }
+                try {
+                    Clip test = AudioSystem.getClip(info);
+                    test.close();
+                    names.add(info.getName());
+                } catch (LineUnavailableException ignored) {
                 }
             } catch (Exception ignored) {
             }
@@ -462,6 +674,10 @@ public class AudioPlayer {
         setClipVolume(clip, volume);
     }
 
+    private void applyVolume(SourceDataLine line) {
+        setLineVolume(line, volume);
+    }
+
     private void setClipVolume(Clip clip, float linearVolume) {
         try {
             FloatControl control = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
@@ -472,6 +688,18 @@ public class AudioPlayer {
             control.setValue(dB);
         } catch (IllegalArgumentException e) {
             // Volume control not available
+        }
+    }
+
+    private void setLineVolume(SourceDataLine line, float linearVolume) {
+        try {
+            FloatControl control = (FloatControl) line.getControl(FloatControl.Type.MASTER_GAIN);
+            float effectiveVolume = applyDucking(linearVolume);
+            float dB = (float) (20.0 * Math.log10(Math.max(effectiveVolume, 0.0001)));
+            dB = Math.max(dB, control.getMinimum());
+            dB = Math.min(dB, control.getMaximum());
+            control.setValue(dB);
+        } catch (IllegalArgumentException ignored) {
         }
     }
 
@@ -500,6 +728,31 @@ public class AudioPlayer {
         setClipVolume(clip, targetVolume);
     }
 
+    private void fadeToVolume(SourceDataLine line, float targetVolume, int durationMs) {
+        if (line == null || !line.isOpen()) {
+            return;
+        }
+        int safeMs = Math.max(0, durationMs);
+        if (safeMs == 0) {
+            setLineVolume(line, targetVolume);
+            return;
+        }
+        int steps = Math.max(1, Math.min(24, safeMs / 15));
+        float start = applyDucking(this.volume);
+        for (int i = 1; i <= steps; i++) {
+            float t = i / (float) steps;
+            float v = start + (applyDucking(targetVolume) - start) * t;
+            setLineVolume(line, v);
+            try {
+                Thread.sleep(Math.max(5L, safeMs / (long) steps));
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        setLineVolume(line, targetVolume);
+    }
+
     public void shutdown() {
         stopInternal();
         executor.shutdownNow();
@@ -511,9 +764,18 @@ public class AudioPlayer {
             return null;
         }
         Files.createDirectories(CLIENT_CACHE_DIR);
-        Path target = CLIENT_CACHE_DIR.resolve(videoId + ".mp3");
+        Path target = CLIENT_CACHE_DIR.resolve(videoId + ".wav");
         if (Files.exists(target)) {
-            return target;
+            try {
+                long size = Files.size(target);
+                if (size > 0) {
+                    return target;
+                }
+                Files.deleteIfExists(target);
+                MineifyClient.LOGGER.warn("Cached file was empty, re-downloading: {}", target);
+            } catch (IOException ignored) {
+                return target;
+            }
         }
         Path tmp = CLIENT_CACHE_DIR.resolve(videoId + ".part");
         try (InputStream in = new URL(downloadUrl).openStream()) {
@@ -639,6 +901,129 @@ public class AudioPlayer {
         if (clip != null && clip.isOpen()) {
             applyVolume(clip);
         }
+        StreamState stream = currentStream;
+        if (stream != null && stream.line != null) {
+            applyVolume(stream.line);
+        }
+    }
+
+    private StreamState createStreamState(AudioStreamStartPacket payload) {
+        try {
+            AudioFormat format = new AudioFormat(
+                    AudioFormat.Encoding.PCM_SIGNED,
+                    payload.sampleRate(),
+                    payload.bitsPerSample(),
+                    payload.channels(),
+                    payload.channels() * (payload.bitsPerSample() / 8),
+                    payload.sampleRate(),
+                    false
+            );
+            SourceDataLine line = createSourceLine(format);
+            line.open(format);
+            StreamState state = new StreamState(payload.streamId(), payload.videoId(), payload.title(), format, line, payload.durationMs());
+            state.bytesPerMs = Math.max(1.0, (format.getSampleRate() * format.getFrameSize()) / 1000.0);
+            return state;
+        } catch (LineUnavailableException e) {
+            MineifyClient.LOGGER.warn("Failed to open audio stream line: {}", e.toString());
+            return null;
+        }
+    }
+
+    private void startStreamWriter(StreamState state) {
+        if (state.started || state.line == null) {
+            return;
+        }
+        state.started = true;
+        Thread writer = new Thread(() -> runStreamWriter(state), "Mineify-Stream-" + state.streamId);
+        writer.setDaemon(true);
+        state.writer = writer;
+        writer.start();
+    }
+
+    private void runStreamWriter(StreamState state) {
+        try {
+            waitForScheduledStart(state.scheduledStartNanos);
+            if (state.line != null) {
+                setLineVolume(state.line, 0.0f);
+                suppressMinecraftMusic();
+                state.line.start();
+                fadeToVolume(state.line, volume, MineifyConfig.getPlaybackCrossfadeMs());
+            }
+            playing = true;
+            paused = false;
+            currentTitle = state.title;
+            while (true) {
+                byte[] data = state.queue.take();
+                if (data == StreamState.END_SENTINEL) {
+                    break;
+                }
+                if (state.bytesToSkip > 0) {
+                    int skipNow = (int) Math.min(state.bytesToSkip, data.length);
+                    state.bytesToSkip -= skipNow;
+                    if (skipNow == data.length) {
+                        continue;
+                    }
+                    byte[] remaining = new byte[data.length - skipNow];
+                    System.arraycopy(data, skipNow, remaining, 0, remaining.length);
+                    data = remaining;
+                }
+                while (state.paused) {
+                    Thread.sleep(10L);
+                }
+                if (state.line != null) {
+                    int written = state.line.write(data, 0, data.length);
+                    state.bytesWritten += written;
+                }
+            }
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (state.line != null) {
+                state.line.drain();
+                state.line.stop();
+                state.line.close();
+            }
+            if (currentStream == state) {
+                currentStream = null;
+            }
+            playing = false;
+            paused = false;
+            currentTitle = "";
+            restoreMinecraftMusic();
+        }
+    }
+
+    private void stopStreamInternal() {
+        StreamState stream = currentStream;
+        if (stream == null) {
+            return;
+        }
+        currentStream = null;
+        stream.queue.offer(StreamState.END_SENTINEL);
+        if (stream.line != null) {
+            stream.line.stop();
+            stream.line.close();
+        }
+        playing = false;
+        paused = false;
+        currentTitle = "";
+        currentDownloadUrl = null;
+    }
+
+    private SourceDataLine createSourceLine(AudioFormat format) throws LineUnavailableException {
+        if (customOutputEnabled && customOutputMixerName != null && !customOutputMixerName.isBlank()) {
+            for (Mixer.Info info : AudioSystem.getMixerInfo()) {
+                if (info.getName().equals(customOutputMixerName)) {
+                    Mixer mixer = AudioSystem.getMixer(info);
+                    DataLine.Info lineInfo = new DataLine.Info(SourceDataLine.class, format);
+                    if (mixer.isLineSupported(lineInfo)) {
+                        return (SourceDataLine) mixer.getLine(lineInfo);
+                    }
+                }
+            }
+        }
+        DataLine.Info lineInfo = new DataLine.Info(SourceDataLine.class, format);
+        return (SourceDataLine) AudioSystem.getLine(lineInfo);
     }
 
     private Clip createClip() throws LineUnavailableException {
@@ -653,6 +1038,39 @@ public class AudioPlayer {
             }
         }
         return AudioSystem.getClip();
+    }
+
+    private static class StreamState {
+        static final byte[] END_SENTINEL = new byte[0];
+
+        final long streamId;
+        String videoId;
+        String title;
+        final AudioFormat format;
+        final SourceDataLine line;
+        final BlockingQueue<byte[]> queue = new LinkedBlockingQueue<>();
+        final long durationMs;
+        volatile boolean started;
+        volatile boolean paused;
+        volatile long scheduledStartNanos;
+        volatile long startOffsetMs;
+        volatile boolean serverSkipped;
+        volatile double bytesPerMs = 1.0;
+        volatile double bytesToSkip = 0.0;
+        volatile long bytesWritten = 0L;
+        volatile long progressBaseMs = 0L;
+        volatile long dataSize = 0L;
+        volatile long bytesReceived = 0L;
+        Thread writer;
+
+        StreamState(long streamId, String videoId, String title, AudioFormat format, SourceDataLine line, long durationMs) {
+            this.streamId = streamId;
+            this.videoId = videoId;
+            this.title = title;
+            this.format = format;
+            this.line = line;
+            this.durationMs = durationMs;
+        }
     }
 
     private static class ClientSettings {

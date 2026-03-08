@@ -308,7 +308,7 @@ public class MineifyScreen extends Screen {
         this.addDrawableChild(this.volumeSlider);
 
         int optionsLeft = panelLeft + 14;
-        int optionsTop = panelTop + 42;
+        int optionsTop = panelTop + CONTENT_TOP_NO_SEARCH + 36;
         int optionsWidth = PANEL_WIDTH - 28;
         this.optionsToggleOutputButton = ButtonWidget.builder(Text.literal("Set Custom Output Device: OFF"), button -> {
                     boolean enabled = !AudioPlayer.getInstance().isCustomOutputEnabled();
@@ -1005,14 +1005,17 @@ public class MineifyScreen extends Screen {
         int bottom = getListBottom(panelTop);
         context.fill(left, top - 2, right, bottom, 0x1A000000);
 
-        int y = top + 6;
-        context.drawTextWithShadow(this.textRenderer, Text.literal("Audio Output"), left + 6, y, 0xFFBFC7D5);
-        y += 16;
-        context.drawTextWithShadow(this.textRenderer, Text.literal("Choose a custom output device for Mineify audio."), left + 6, y, 0xFF6E7786);
-        y += 44;
-        context.drawTextWithShadow(this.textRenderer, Text.literal("Voice Ducking"), left + 6, y, 0xFFBFC7D5);
-        y += 16;
-        context.drawTextWithShadow(this.textRenderer, Text.literal("Lower Mineify volume while speaking in voice chat."), left + 6, y, 0xFF6E7786);
+        int outputButtonY = optionsToggleOutputButton != null ? optionsToggleOutputButton.getY() : top + 36;
+        int outputHeaderY = Math.max(top + 6, outputButtonY - 26);
+        int outputDescY = outputHeaderY + 12;
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Audio Output"), left + 6, outputHeaderY, 0xFFBFC7D5);
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Choose a custom output device for Mineify audio."), left + 6, outputDescY, 0xFF6E7786);
+
+        int duckingButtonY = optionsDuckingToggleButton != null ? optionsDuckingToggleButton.getY() : outputButtonY + 52;
+        int duckingHeaderY = Math.max(outputDescY + 22, duckingButtonY - 26);
+        int duckingDescY = duckingHeaderY + 12;
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Voice Ducking"), left + 6, duckingHeaderY, 0xFFBFC7D5);
+        context.drawTextWithShadow(this.textRenderer, Text.literal("Lower Mineify volume while speaking in voice chat."), left + 6, duckingDescY, 0xFF6E7786);
     }
 
     private void renderContextMenu(DrawContext context, int mouseX, int mouseY) {
@@ -1694,7 +1697,9 @@ public class MineifyScreen extends Screen {
             int barWidth = contentWidth;
             int barX = contentLeft;
             int barY = y + 24;
-            context.fill(barX, barY, barX + barWidth, barY + 4, 0x44FFFFFF);
+            float bufferedProgress = Math.min(1f, Math.max(playbackProgress, AudioPlayer.getInstance().getBufferedProgress()));
+            context.fill(barX, barY, barX + barWidth, barY + 4, 0xFF2A2A2A);
+            context.fill(barX, barY, barX + (int) (barWidth * bufferedProgress), barY + 4, 0xFFB0B0B0);
             context.fill(barX, barY, barX + (int) (barWidth * playbackProgress), barY + 4, playbackPaused ? 0xFFFFAA00 : 0xFF55FF55);
 
             boolean hoveringBar = mouseX >= barX && mouseX <= barX + barWidth && mouseY >= barY - 1 && mouseY <= barY + 5;

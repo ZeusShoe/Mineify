@@ -5,11 +5,12 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 import com.mineify.Mineify;
 import com.mineify.MineifyConfig;
+import com.mineify.network.packets.AudioStreamChunkPacket;
+import com.mineify.network.packets.AudioStreamEndPacket;
+import com.mineify.network.packets.AudioStreamStartPacket;
 import com.mineify.network.packets.NowPlayingPacket;
-import com.mineify.network.packets.PlayAudioPacket;
 import com.mineify.network.packets.PlaybackLockPacket;
 import com.mineify.network.packets.PlaybackStatePacket;
-import com.mineify.network.packets.PrefetchAudioPacket;
 import com.mineify.network.packets.PlaylistSyncPacket;
 import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
@@ -27,10 +28,13 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 
 import java.io.IOException;
+import java.io.BufferedInputStream;
+import java.io.InputStream;
 import java.io.Reader;
 import java.io.Writer;
 import java.lang.reflect.Type;
 import java.net.URI;
+import java.net.URL;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -43,6 +47,7 @@ import java.util.Deque;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -118,6 +123,11 @@ public class PlaylistManager {
         t.setDaemon(true);
         return t;
     });
+    private final ExecutorService streamExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "Mineify-Stream");
+        t.setDaemon(true);
+        return t;
+    });
 
     private int currentIndex = -1;
     private boolean isPlaying = false;
@@ -126,13 +136,14 @@ public class PlaylistManager {
     private long playbackStartNanos = 0;
     private long currentTrackDurationMs = 0;
     private String currentDownloadUrl = null;
+    private StreamSession currentStream;
+    private long streamIdCounter = 0L;
     private long playbackRequestNonce = 0L;
     private long waitingReadyNonce = -1L;
     private String waitingReadyVideoId = null;
     private final java.util.Set<String> waitingReadyPlayers = new java.util.HashSet<>();
     private final Set<String> skipVotes = new java.util.HashSet<>();
     private final Set<String> replayVotes = new java.util.HashSet<>();
-    private final Set<String> prefetchInFlight = ConcurrentHashMap.newKeySet();
     private long metricsNextLogAtMs = 0L;
     private long metricsDownloadCount = 0L;
     private long metricsDownloadTotalMs = 0L;
@@ -258,11 +269,8 @@ public class PlaylistManager {
         );
         playlist.add(entry);
         syncToAll();
-
         if (!isPlaying) {
             playNext();
-        } else {
-            prefetchUpcomingTracks();
         }
     }
 
@@ -303,7 +311,6 @@ public class PlaylistManager {
         }
 
         syncToAll();
-        prefetchUpcomingTracks();
     }
 
     public void handlePlaybackControl(ServerPlayerEntity player, String action) {
@@ -428,18 +435,8 @@ public class PlaylistManager {
         }
 
         PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
-        if (currentDownloadUrl != null) {
-            PlayAudioPacket seekPacket = new PlayAudioPacket(
-                    currentDownloadUrl,
-                    entry.title(),
-                    entry.videoId(),
-                    clampedMs,
-                    scheduledDelayMs
-            );
-            for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
-                ServerPlayNetworking.send(p, seekPacket);
-            }
-        }
+        stopStream();
+        restartStreamFromOffset(entry, clampedMs);
         broadcastNowPlaying(entry.title(), clampedMs);
         scheduleAdvanceFromCurrentState();
     }
@@ -880,16 +877,8 @@ public class PlaylistManager {
             PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
             long elapsedMs = getElapsedPlaybackMs();
             ServerPlayNetworking.send(player, buildNowPlayingPacket(entry.title(), elapsedMs));
-
             if (currentDownloadUrl != null) {
-                long joinDelayMs = 0L;
-                ServerPlayNetworking.send(player, new PlayAudioPacket(
-                        currentDownloadUrl,
-                        entry.title(),
-                        entry.videoId(),
-                        elapsedMs,
-                        joinDelayMs
-                ));
+                streamToPlayerFromOffset(player, entry, elapsedMs);
             }
 
             ServerPlayNetworking.send(player, new PlaybackStatePacket(paused));
@@ -904,6 +893,7 @@ public class PlaylistManager {
         playbackRequestNonce++;
         clearClientReadyWait();
         clearVotes();
+        stopStream();
         long requestNonce = playbackRequestNonce;
         currentIndex++;
         if (currentIndex >= playlist.size()) {
@@ -950,34 +940,7 @@ public class PlaylistManager {
                 }
                 currentDownloadUrl = downloadUrl;
                 playbackStartNanos = 0L;
-
-                PlayAudioPacket packet = new PlayAudioPacket(
-                        downloadUrl,
-                        entry.title(),
-                        entry.videoId(),
-                        0L,
-                        0L
-                );
-                waitingReadyNonce = requestNonce;
-                waitingReadyVideoId = entry.videoId();
-                waitingReadyPlayers.clear();
-                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
-                    waitingReadyPlayers.add(p.getUuidAsString());
-                }
-                waitingReadyStartedAtNs = System.nanoTime();
-                // Hold controls while clients load; start all together on ready.
-                paused = false;
-                pausedElapsedMs = 0;
-                broadcastPlaybackLock(true);
-                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
-                    ServerPlayNetworking.send(p, packet);
-                }
-
-                if (waitingReadyPlayers.isEmpty()) {
-                    startCurrentTrackPlayback(entry);
-                    return;
-                }
-                prefetchUpcomingTracks();
+                prepareStream(entry, downloadUrl, requestNonce);
             });
         });
     }
@@ -1011,7 +974,7 @@ public class PlaylistManager {
             metricsReadyTotalMs += waitMs;
             waitingReadyStartedAtNs = 0L;
         }
-        long startDelayMs = Math.max(0, MineifyConfig.getPlaybackPreloadBufferMs());
+        long startDelayMs = Math.max(50, MineifyConfig.getPlaybackPreloadBufferMs());
         playbackStartNanos = System.nanoTime() + (startDelayMs * 1_000_000L);
         paused = false;
         pausedElapsedMs = 0;
@@ -1019,23 +982,280 @@ public class PlaylistManager {
         if (MineifyConfig.isNowPlayingChatCardsEnabled()) {
             broadcastNowPlayingCard(entry);
         }
-        if (currentDownloadUrl != null) {
-            PlayAudioPacket startPacket = new PlayAudioPacket(
-                    currentDownloadUrl,
-                    entry.title(),
-                    entry.videoId(),
-                    0L,
-                    startDelayMs
-            );
-            for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
-                ServerPlayNetworking.send(p, startPacket);
-            }
-        }
+        beginStreaming(entry, 0L, startDelayMs, false);
         broadcastPlaybackLock(false);
         broadcastPlaybackState(false);
         broadcastNowPlaying(entry.title(), 0L);
         scheduleAdvanceFromCurrentState();
-        prefetchUpcomingTracks();
+    }
+
+    private void prepareStream(PlaylistSyncPacket.Entry entry, String downloadUrl, long requestNonce) {
+        streamExecutor.submit(() -> {
+            StreamSession session = null;
+            try {
+                session = openWavStream(downloadUrl, entry.videoId(), entry.title(), 0L);
+            } catch (IOException e) {
+                Mineify.LOGGER.error("Failed to open WAV stream for {}", entry.title(), e);
+            }
+            StreamSession finalSession = session;
+            server.execute(() -> {
+                if (requestNonce != playbackRequestNonce || currentIndex < 0 || currentIndex >= playlist.size()) {
+                    if (finalSession != null) {
+                        finalSession.close();
+                    }
+                    return;
+                }
+                if (finalSession == null) {
+                    Mineify.LOGGER.error("Stream prep failed for: {}", entry.title());
+                    playNext();
+                    return;
+                }
+                currentStream = finalSession;
+                waitingReadyNonce = requestNonce;
+                waitingReadyVideoId = entry.videoId();
+                waitingReadyPlayers.clear();
+                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+                    waitingReadyPlayers.add(p.getUuidAsString());
+                }
+                waitingReadyStartedAtNs = System.nanoTime();
+                paused = false;
+                pausedElapsedMs = 0;
+                broadcastPlaybackLock(true);
+                sendStreamStart(entry, 0L, 0L, false, true);
+                if (waitingReadyPlayers.isEmpty()) {
+                    startCurrentTrackPlayback(entry);
+                }
+            });
+        });
+    }
+
+    private void streamToPlayerFromOffset(ServerPlayerEntity player, PlaylistSyncPacket.Entry entry, long offsetMs) {
+        streamExecutor.submit(() -> {
+            try {
+                StreamSession session = openWavStream(currentDownloadUrl, entry.videoId(), entry.title(), offsetMs);
+                if (session == null) {
+                    return;
+                }
+                AudioStreamStartPacket startPacket = new AudioStreamStartPacket(
+                        entry.videoId(),
+                        entry.title(),
+                        session.streamId,
+                        session.info.sampleRate,
+                        session.info.channels,
+                        session.info.bitsPerSample,
+                        session.info.dataSize,
+                        currentTrackDurationMs,
+                        offsetMs,
+                        0L,
+                        false,
+                        true
+                );
+                server.execute(() -> ServerPlayNetworking.send(player, startPacket));
+                streamToPlayers(session.streamId, entry, session, java.util.List.of(player));
+            } catch (IOException e) {
+                Mineify.LOGGER.warn("Failed to stream to player {} from offset {}", player.getName().getString(), offsetMs, e);
+            }
+        });
+    }
+
+    private void restartStreamFromOffset(PlaylistSyncPacket.Entry entry, long offsetMs) {
+        if (currentDownloadUrl == null) {
+            return;
+        }
+        streamExecutor.submit(() -> {
+            try {
+                StreamSession session = openWavStream(currentDownloadUrl, entry.videoId(), entry.title(), offsetMs);
+                if (session == null) {
+                    return;
+                }
+                server.execute(() -> {
+                    currentStream = session;
+                    sendStreamStart(entry, offsetMs, 0L, true);
+                    streamExecutor.submit(() -> streamToPlayers(session.streamId, entry, session));
+                });
+            } catch (IOException e) {
+                Mineify.LOGGER.warn("Failed to restart stream at {}ms for {}", offsetMs, entry.title(), e);
+            }
+        });
+    }
+
+    private void sendStreamStart(PlaylistSyncPacket.Entry entry, long startOffsetMs, long scheduledDelayMs, boolean serverSkipped) {
+        sendStreamStart(entry, startOffsetMs, scheduledDelayMs, serverSkipped, false);
+    }
+
+    private void sendStreamStart(PlaylistSyncPacket.Entry entry, long startOffsetMs, long scheduledDelayMs, boolean serverSkipped, boolean preloadOnly) {
+        StreamSession session = currentStream;
+        if (session == null) {
+            return;
+        }
+        AudioStreamStartPacket packet = new AudioStreamStartPacket(
+                entry.videoId(),
+                entry.title(),
+                session.streamId,
+                session.info.sampleRate,
+                session.info.channels,
+                session.info.bitsPerSample,
+                session.info.dataSize,
+                currentTrackDurationMs,
+                startOffsetMs,
+                scheduledDelayMs,
+                preloadOnly,
+                serverSkipped
+        );
+        for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(p, packet);
+        }
+    }
+
+    private void beginStreaming(PlaylistSyncPacket.Entry entry, long startOffsetMs, long scheduledDelayMs, boolean serverSkipped) {
+        StreamSession session = currentStream;
+        if (session == null) {
+            return;
+        }
+        long streamId = session.streamId;
+        long delayMs = Math.max(0L, scheduledDelayMs);
+        sendStreamStart(entry, startOffsetMs, delayMs, serverSkipped);
+        streamExecutor.submit(() -> streamToPlayers(streamId, entry, session));
+    }
+
+    private void streamToPlayers(long streamId, PlaylistSyncPacket.Entry entry, StreamSession session) {
+        streamToPlayers(streamId, entry, session, server.getPlayerManager().getPlayerList());
+    }
+
+    private void streamToPlayers(long streamId, PlaylistSyncPacket.Entry entry, StreamSession session, List<ServerPlayerEntity> targets) {
+        int sequence = 0;
+        byte[] buffer = new byte[64 * 1024];
+        try (InputStream in = session.inputStream) {
+            int read;
+            while ((read = in.read(buffer)) >= 0) {
+                if (session.streamId != streamId || session.cancelled) {
+                    return;
+                }
+                byte[] chunk = java.util.Arrays.copyOf(buffer, read);
+                AudioStreamChunkPacket packet = new AudioStreamChunkPacket(streamId, sequence++, chunk, false);
+                server.execute(() -> {
+                    for (ServerPlayerEntity p : targets) {
+                        ServerPlayNetworking.send(p, packet);
+                    }
+                });
+            }
+        } catch (IOException e) {
+            Mineify.LOGGER.error("Stream failed for {}", entry.title(), e);
+        } finally {
+            server.execute(() -> {
+                AudioStreamEndPacket endPacket = new AudioStreamEndPacket(streamId);
+                for (ServerPlayerEntity p : targets) {
+                    ServerPlayNetworking.send(p, endPacket);
+                }
+            });
+        }
+    }
+
+    private void stopStream() {
+        StreamSession session = currentStream;
+        if (session == null) {
+            return;
+        }
+        currentStream = null;
+        session.cancelled = true;
+        session.close();
+    }
+
+    private StreamSession openWavStream(String downloadUrl, String videoId, String title, long startOffsetMs) throws IOException {
+        long streamId = ++streamIdCounter;
+        BufferedInputStream inputStream = new BufferedInputStream(new URL(downloadUrl).openStream());
+        WavInfo info = readWavInfo(inputStream);
+        if (info == null) {
+            inputStream.close();
+            throw new IOException("Invalid WAV header");
+        }
+        if (startOffsetMs > 0) {
+            long bytesToSkip = Math.round(startOffsetMs * info.bytesPerMs());
+            skipFully(inputStream, bytesToSkip);
+        }
+        return new StreamSession(streamId, videoId, title, downloadUrl, inputStream, info);
+    }
+
+    private WavInfo readWavInfo(InputStream in) throws IOException {
+        String riff = readAscii(in, 4);
+        if (!"RIFF".equals(riff)) {
+            return null;
+        }
+        readLittleInt(in);
+        String wave = readAscii(in, 4);
+        if (!"WAVE".equals(wave)) {
+            return null;
+        }
+        int channels = 0;
+        int sampleRate = 0;
+        int bitsPerSample = 16;
+        long dataSize = -1;
+        while (true) {
+            String chunkId = readAscii(in, 4);
+            int chunkSize = readLittleInt(in);
+            if ("fmt ".equals(chunkId)) {
+                int audioFormat = readLittleShort(in);
+                channels = readLittleShort(in);
+                sampleRate = readLittleInt(in);
+                readLittleInt(in);
+                readLittleShort(in);
+                bitsPerSample = readLittleShort(in);
+                int remaining = chunkSize - 16;
+                if (remaining > 0) {
+                    skipFully(in, remaining);
+                }
+                if (audioFormat != 1) {
+                    Mineify.LOGGER.warn("Unexpected WAV encoding {} (expected PCM)", audioFormat);
+                }
+            } else if ("data".equals(chunkId)) {
+                dataSize = Integer.toUnsignedLong(chunkSize);
+                break;
+            } else {
+                skipFully(in, chunkSize);
+            }
+        }
+        if (channels <= 0 || sampleRate <= 0 || dataSize < 0) {
+            return null;
+        }
+        return new WavInfo(sampleRate, channels, bitsPerSample, dataSize);
+    }
+
+    private String readAscii(InputStream in, int len) throws IOException {
+        byte[] buf = in.readNBytes(len);
+        if (buf.length != len) {
+            throw new IOException("Unexpected EOF");
+        }
+        return new String(buf, java.nio.charset.StandardCharsets.US_ASCII);
+    }
+
+    private int readLittleInt(InputStream in) throws IOException {
+        byte[] buf = in.readNBytes(4);
+        if (buf.length != 4) {
+            throw new IOException("Unexpected EOF");
+        }
+        return (buf[0] & 0xFF) | ((buf[1] & 0xFF) << 8) | ((buf[2] & 0xFF) << 16) | ((buf[3] & 0xFF) << 24);
+    }
+
+    private short readLittleShort(InputStream in) throws IOException {
+        byte[] buf = in.readNBytes(2);
+        if (buf.length != 2) {
+            throw new IOException("Unexpected EOF");
+        }
+        return (short) ((buf[0] & 0xFF) | ((buf[1] & 0xFF) << 8));
+    }
+
+    private void skipFully(InputStream in, long bytes) throws IOException {
+        long remaining = bytes;
+        while (remaining > 0) {
+            long skipped = in.skip(remaining);
+            if (skipped <= 0) {
+                if (in.read() == -1) {
+                    throw new IOException("Unexpected EOF");
+                }
+                skipped = 1;
+            }
+            remaining -= skipped;
+        }
     }
 
     private void clearClientReadyWait() {
@@ -1118,32 +1338,6 @@ public class PlaylistManager {
         }
     }
 
-    private void prefetchUpcomingTracks() {
-        int count = Math.max(0, MineifyConfig.getPlaybackPrefetchCount());
-        if (count <= 0 || playlist.isEmpty()) {
-            return;
-        }
-        int start = (isPlaying && currentIndex >= 0) ? (currentIndex + 1) : 1;
-        start = Math.max(0, start);
-        int end = Math.min(playlist.size(), start + count);
-        for (int i = start; i < end; i++) {
-            String videoId = playlist.get(i).videoId();
-            if (!prefetchInFlight.add(videoId)) {
-                continue;
-            }
-            companionClient.requestDownload(videoId).whenComplete((url, err) -> {
-                prefetchInFlight.remove(videoId);
-                if (err != null || url == null || url.isBlank()) {
-                    return;
-                }
-                PrefetchAudioPacket packet = new PrefetchAudioPacket(url, videoId);
-                for (ServerPlayerEntity p : server.getPlayerManager().getPlayerList()) {
-                    ServerPlayNetworking.send(p, packet);
-                }
-            });
-        }
-    }
-
     private void advanceAfterTrackEnd() {
         playbackRequestNonce++;
         if (currentIndex >= 0 && currentIndex < playlist.size()) {
@@ -1152,6 +1346,7 @@ public class PlaylistManager {
             currentIndex--;
             syncToAll();
         }
+        stopStream();
         playNext();
     }
 
@@ -1162,6 +1357,7 @@ public class PlaylistManager {
 
         pausedElapsedMs = getElapsedPlaybackMs();
         paused = true;
+        stopStream();
         playbackRequestNonce++;
         cancelAdvanceSchedule();
         broadcastPlaybackState(true);
@@ -1178,6 +1374,7 @@ public class PlaylistManager {
         playbackRequestNonce++;
         broadcastPlaybackState(false);
         broadcastNowPlaying(playlist.get(currentIndex).title(), getElapsedPlaybackMs());
+        restartStreamFromOffset(playlist.get(currentIndex), pausedElapsedMs);
         scheduleAdvanceFromCurrentState();
     }
 
@@ -1235,6 +1432,50 @@ public class PlaylistManager {
         PlaybackLockPacket packet = new PlaybackLockPacket(locked);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, packet);
+        }
+    }
+
+    private static class StreamSession {
+        final long streamId;
+        final String videoId;
+        final String title;
+        final String downloadUrl;
+        final InputStream inputStream;
+        final WavInfo info;
+        volatile boolean cancelled;
+
+        StreamSession(long streamId, String videoId, String title, String downloadUrl, InputStream inputStream, WavInfo info) {
+            this.streamId = streamId;
+            this.videoId = videoId;
+            this.title = title;
+            this.downloadUrl = downloadUrl;
+            this.inputStream = inputStream;
+            this.info = info;
+        }
+
+        void close() {
+            try {
+                inputStream.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private static class WavInfo {
+        final int sampleRate;
+        final int channels;
+        final int bitsPerSample;
+        final long dataSize;
+
+        WavInfo(int sampleRate, int channels, int bitsPerSample, long dataSize) {
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+            this.bitsPerSample = bitsPerSample;
+            this.dataSize = dataSize;
+        }
+
+        double bytesPerMs() {
+            return (sampleRate * (double) channels * (bitsPerSample / 8.0)) / 1000.0;
         }
     }
 
@@ -1726,12 +1967,14 @@ public class PlaylistManager {
         if (progressFuture != null) {
             progressFuture.cancel(true);
         }
+        stopStream();
         saveUserPlaylists();
         savePlaylistLikes();
         saveRecentlyPlayed();
         spotifyImportSessions.clear();
         spotifyImportPreviewSessions.clear();
         scheduler.shutdownNow();
+        streamExecutor.shutdownNow();
         playlist.clear();
         Mineify.LOGGER.info("Mineify: Playlist manager shut down");
     }
@@ -1820,6 +2063,7 @@ public class PlaylistManager {
         playbackRequestNonce++;
         clearClientReadyWait();
         clearVotes();
+        stopStream();
         playlist.clear();
         cancelAdvanceSchedule();
         isPlaying = false;

@@ -25,7 +25,8 @@ router.post('/', async (req, res, next) => {
 // GET /api/download/:videoId — serve the WAV file
 router.get('/:videoId', (req, res) => {
     const downloadDir = process.env.DOWNLOAD_DIR || './downloads';
-    const filePath = path.resolve(path.join(downloadDir, `${req.params.videoId}.mp3`));
+    const filePath = path.resolve(path.join(downloadDir, `${req.params.videoId}.wav`));
+    res.setHeader('Content-Type', 'audio/wav');
     res.sendFile(filePath);
 });
 

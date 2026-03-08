@@ -3,6 +3,9 @@ package com.mineify.network;
 import com.mineify.Mineify;
 import com.mineify.network.packets.AddToPlaylistPacket;
 import com.mineify.network.packets.AddToUserPlaylistPacket;
+import com.mineify.network.packets.AudioStreamChunkPacket;
+import com.mineify.network.packets.AudioStreamEndPacket;
+import com.mineify.network.packets.AudioStreamStartPacket;
 import com.mineify.network.packets.ConfirmSpotifyImportPacket;
 import com.mineify.network.packets.CreateUserPlaylistPacket;
 import com.mineify.network.packets.PlaybackControlPacket;
@@ -63,6 +66,18 @@ public class MineifyPackets {
         PayloadTypeRegistry.playS2C().register(
                 com.mineify.network.packets.PlayAudioPacket.ID,
                 com.mineify.network.packets.PlayAudioPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                AudioStreamStartPacket.ID,
+                AudioStreamStartPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                AudioStreamChunkPacket.ID,
+                AudioStreamChunkPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                AudioStreamEndPacket.ID,
+                AudioStreamEndPacket.CODEC
         );
         PayloadTypeRegistry.playS2C().register(
                 PlaybackLockPacket.ID,
