@@ -7,10 +7,8 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.minecraft.server.PlayerConfigEntry;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
-import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,7 +35,7 @@ public class Mineify implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             dispatcher.register(CommandManager.literal("mineify")
                     .then(CommandManager.literal("reload")
-                            .requires(Mineify::isOp)
+                            .requires(CommandManager.requirePermissionLevel(CommandManager.OWNERS_CHECK))
                             .executes(ctx -> {
                                 MineifyConfig.reload();
                                 companionClient = new CompanionClient(MineifyConfig.getCompanionUrl());
@@ -48,7 +46,7 @@ public class Mineify implements ModInitializer {
                                 return 1;
                             }))
                     .then(CommandManager.literal("status")
-                            .requires(Mineify::isOp)
+                            .requires(CommandManager.requirePermissionLevel(CommandManager.OWNERS_CHECK))
                             .executes(ctx -> {
                                 PlaylistManager manager = Mineify.getPlaylistManager();
                                 if (manager == null) {
@@ -66,7 +64,7 @@ public class Mineify implements ModInitializer {
                                 return 1;
                             }))
                     .then(CommandManager.literal("perms")
-                            .requires(Mineify::isOp)
+                            .requires(CommandManager.requirePermissionLevel(CommandManager.OWNERS_CHECK))
                             .executes(ctx -> {
                                 String perms = String.join(", ", PlaylistManager.getPermissionNodes());
                                 ctx.getSource().sendFeedback(() -> Text.literal("Mineify permission nodes: " + perms), false);
@@ -126,12 +124,6 @@ public class Mineify implements ModInitializer {
     }
 
     private static boolean isOp(ServerCommandSource source) {
-        if (source.getEntity() instanceof ServerPlayerEntity player) {
-            return source.getServer()
-                    .getPlayerManager()
-                    .getOpList()
-                    .contains(new PlayerConfigEntry(player.getGameProfile()));
-        }
-        return true;
+        return CommandManager.requirePermissionLevel(CommandManager.OWNERS_CHECK).test(source);
     }
 }
