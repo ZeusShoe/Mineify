@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { downloadAsWav, deleteDownload } from '../services/downloader.js';
 import path from 'path';
+import fs from 'fs';
 
 const router = Router();
 
@@ -26,6 +27,9 @@ router.post('/', async (req, res, next) => {
 router.get('/:videoId', (req, res) => {
     const downloadDir = process.env.DOWNLOAD_DIR || './downloads';
     const filePath = path.resolve(path.join(downloadDir, `${req.params.videoId}.wav`));
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
     res.setHeader('Content-Type', 'audio/wav');
     res.sendFile(filePath);
 });

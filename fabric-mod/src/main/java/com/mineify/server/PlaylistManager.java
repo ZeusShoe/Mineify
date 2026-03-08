@@ -1179,12 +1179,12 @@ public class PlaylistManager {
     private WavInfo readWavInfo(InputStream in) throws IOException {
         String riff = readAscii(in, 4);
         if (!"RIFF".equals(riff)) {
-            return null;
+            throw new IOException("Invalid WAV header: expected RIFF, got '" + riff + "'");
         }
         readLittleInt(in);
         String wave = readAscii(in, 4);
         if (!"WAVE".equals(wave)) {
-            return null;
+            throw new IOException("Invalid WAV header: expected WAVE, got '" + wave + "'");
         }
         int channels = 0;
         int sampleRate = 0;

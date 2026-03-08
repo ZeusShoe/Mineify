@@ -32,6 +32,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.DirectoryStream;
+import java.io.IOException;
 
 @Environment(EnvType.CLIENT)
 public class MineifyClient implements ClientModInitializer {
@@ -92,6 +96,8 @@ public class MineifyClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         LOGGER.info("Initializing Mineify Client");
+
+        clearClientCache();
 
         MineifyKeybinds.register();
 
@@ -414,5 +420,41 @@ public class MineifyClient implements ClientModInitializer {
             cachedProfiles = new ArrayList<>();
             cachedRecentlyPlayed = new ArrayList<>();
         });
+    }
+
+    private void clearClientCache() {
+        try {
+            Path cacheDir = Path.of("config", "mineify-cache");
+            if (!Files.exists(cacheDir)) {
+                Files.createDirectories(cacheDir);
+                return;
+            }
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(cacheDir)) {
+                for (Path entry : stream) {
+                    if (Files.isDirectory(entry)) {
+                        deleteRecursively(entry);
+                    } else {
+                        Files.deleteIfExists(entry);
+                    }
+                }
+            }
+            LOGGER.info("Cleared Mineify client cache at {}", cacheDir.toAbsolutePath());
+        } catch (Exception e) {
+            LOGGER.warn("Failed to clear Mineify client cache", e);
+        }
+    }
+
+    private void deleteRecursively(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            return;
+        }
+        if (Files.isDirectory(path)) {
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
+                for (Path entry : stream) {
+                    deleteRecursively(entry);
+                }
+            }
+        }
+        Files.deleteIfExists(path);
     }
 }

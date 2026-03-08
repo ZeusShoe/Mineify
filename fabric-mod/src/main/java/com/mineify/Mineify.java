@@ -10,6 +10,10 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.text.Text;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.DirectoryStream;
+import java.io.IOException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -83,6 +87,17 @@ public class Mineify implements ModInitializer {
             // Initialize the playlist manager
             playlistManager = new PlaylistManager(server, companionClient);
 
+            // Clear server-side companion downloads on startup
+            try {
+                Path downloadsDir = server.getRunDirectory()
+                        .resolve("MineifyCompanion")
+                        .resolve("downloads");
+                clearDirectory(downloadsDir);
+                LOGGER.info("Mineify: Cleared companion downloads at {}", downloadsDir);
+            } catch (Exception e) {
+                LOGGER.warn("Mineify: Failed to clear companion downloads", e);
+            }
+
             LOGGER.info("Mineify: Components initialized successfully");
         });
 
@@ -125,5 +140,35 @@ public class Mineify implements ModInitializer {
 
     private static boolean isOp(ServerCommandSource source) {
         return CommandManager.requirePermissionLevel(CommandManager.OWNERS_CHECK).test(source);
+    }
+
+    private static void clearDirectory(Path dir) throws IOException {
+        if (dir == null) {
+            return;
+        }
+        Files.createDirectories(dir);
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+            for (Path entry : stream) {
+                if (Files.isDirectory(entry)) {
+                    deleteRecursively(entry);
+                } else {
+                    Files.deleteIfExists(entry);
+                }
+            }
+        }
+    }
+
+    private static void deleteRecursively(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            return;
+        }
+        if (Files.isDirectory(path)) {
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
+                for (Path entry : stream) {
+                    deleteRecursively(entry);
+                }
+            }
+        }
+        Files.deleteIfExists(path);
     }
 }
