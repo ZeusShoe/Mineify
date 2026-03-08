@@ -19,6 +19,7 @@ import com.mineify.network.packets.SpotifyImportFinishedPacket;
 import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.SearchResultsPacket;
+import com.mineify.network.packets.SeekPlaybackPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.EnvType;
@@ -402,6 +403,14 @@ public class MineifyClient implements ClientModInitializer {
                 if (MinecraftClient.getInstance().currentScreen instanceof MineifyScreen screen) {
                     screen.updatePlaybackControlsLocked(payload.locked());
                 }
+            });
+        });
+
+        ClientPlayNetworking.registerGlobalReceiver(SeekPlaybackPacket.ID, (payload, context) -> {
+            context.client().execute(() -> {
+                AudioPlayer.getInstance().seekTo(payload.videoId(), payload.elapsedMs(), payload.paused());
+                cachedElapsedMs = payload.elapsedMs();
+                cachedPaused = payload.paused();
             });
         });
 

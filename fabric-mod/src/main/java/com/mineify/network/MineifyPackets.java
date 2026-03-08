@@ -22,6 +22,7 @@ import com.mineify.network.packets.RequestUserPlaylistsPacket;
 import com.mineify.network.packets.ResolveSpotifyImportChoicePacket;
 import com.mineify.network.packets.RemoveFromPlaylistPacket;
 import com.mineify.network.packets.SearchRequestPacket;
+import com.mineify.network.packets.SeekPlaybackPacket;
 import com.mineify.network.packets.SpotifyImportFinishedPacket;
 import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.SpotifyImportPromptPacket;
@@ -114,6 +115,10 @@ public class MineifyPackets {
         PayloadTypeRegistry.playS2C().register(
                 RecentlyPlayedSyncPacket.ID,
                 RecentlyPlayedSyncPacket.CODEC
+        );
+        PayloadTypeRegistry.playS2C().register(
+                SeekPlaybackPacket.ID,
+                SeekPlaybackPacket.CODEC
         );
 
         // Register server-side handlers

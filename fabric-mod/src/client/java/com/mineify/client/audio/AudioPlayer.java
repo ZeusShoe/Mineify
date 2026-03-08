@@ -59,6 +59,7 @@ public class AudioPlayer {
 
     private volatile Clip currentClip;
     private volatile String currentDownloadUrl = null;
+    private volatile String currentVideoId = "";
     private volatile String currentTitle = "";
     private volatile boolean playing = false;
     private volatile boolean paused = false;
@@ -237,6 +238,7 @@ public class AudioPlayer {
 
                     currentClip = clip;
                     currentDownloadUrl = downloadUrl;
+                    currentVideoId = resolvedVideoId == null ? "" : resolvedVideoId;
                     currentTitle = title;
                     playing = false;
                     paused = false;
@@ -325,7 +327,19 @@ public class AudioPlayer {
             }
             state.dataSize = payload.dataSize();
             state.bytesReceived = 0L;
+            currentVideoId = payload.videoId() == null ? "" : payload.videoId();
             if (payload.preloadOnly()) {
+                String preloadVideoId = payload.videoId();
+                String preloadUrl = payload.downloadUrl();
+                if (preloadVideoId != null && !preloadVideoId.isBlank()
+                        && preloadUrl != null && !preloadUrl.isBlank()) {
+                    try {
+                        ensureCachedDownload(preloadVideoId, preloadUrl);
+                        preloadedVideoIds.put(preloadVideoId, Boolean.TRUE);
+                    } catch (IOException e) {
+                        MineifyClient.LOGGER.warn("Preload cache failed for {}: {}", preloadVideoId, e.toString());
+                    }
+                }
                 if (onReady != null) {
                     try {
                         onReady.run();
@@ -409,6 +423,79 @@ public class AudioPlayer {
                 MineifyClient.LOGGER.warn("Prefetch failed for {}: {}", resolvedVideoId, e.toString());
             } finally {
                 prefetchInFlight.remove(resolvedVideoId);
+            }
+        });
+    }
+
+    public void seekTo(String videoId, long elapsedMs, boolean shouldPause) {
+        executor.submit(() -> {
+            if (videoId == null || videoId.isBlank()) {
+                return;
+            }
+            long targetMs = Math.max(0L, elapsedMs);
+
+            if (currentClip != null && currentClip.isOpen() && videoId.equals(currentVideoId)) {
+                long clipLenMs = currentClip.getMicrosecondLength() / 1000L;
+                long clampedMs = Math.min(targetMs, Math.max(0L, clipLenMs));
+                currentClip.setMicrosecondPosition(clampedMs * 1000L);
+                if (shouldPause) {
+                    pauseInternal();
+                } else {
+                    resumeInternal();
+                }
+                return;
+            }
+
+            Path cached = CLIENT_CACHE_DIR.resolve(videoId + ".wav");
+            if (!Files.exists(cached)) {
+                MineifyClient.LOGGER.warn("Seek cache missing for video {}", videoId);
+                return;
+            }
+
+            try {
+                stopStreamInternal();
+                stopClipInternal();
+                Clip clip = createClip();
+                try (AudioInputStream sourceAis = AudioSystem.getAudioInputStream(cached.toFile())) {
+                    AudioFormat baseFormat = sourceAis.getFormat();
+                    AudioFormat playFormat = new AudioFormat(
+                            AudioFormat.Encoding.PCM_SIGNED,
+                            baseFormat.getSampleRate(),
+                            16,
+                            baseFormat.getChannels(),
+                            baseFormat.getChannels() * 2,
+                            baseFormat.getSampleRate(),
+                            false
+                    );
+                    if (!baseFormat.matches(playFormat)) {
+                        try (AudioInputStream convertedAis = AudioSystem.getAudioInputStream(playFormat, sourceAis)) {
+                            clip.open(convertedAis);
+                        }
+                    } else {
+                        clip.open(sourceAis);
+                    }
+                }
+
+                currentClip = clip;
+                currentVideoId = videoId;
+                currentDownloadUrl = "";
+                currentTitle = currentTitle == null ? "" : currentTitle;
+                long clipLenMs = clip.getMicrosecondLength() / 1000L;
+                long clampedMs = Math.min(targetMs, Math.max(0L, clipLenMs));
+                clip.setMicrosecondPosition(clampedMs * 1000L);
+                setClipVolume(clip, 0.0f);
+                if (shouldPause) {
+                    paused = true;
+                    playing = false;
+                } else {
+                    suppressMinecraftMusic();
+                    clip.start();
+                    fadeToVolume(clip, volume, Math.min(250, MineifyConfig.getPlaybackCrossfadeMs()));
+                    paused = false;
+                    playing = true;
+                }
+            } catch (Exception e) {
+                MineifyClient.LOGGER.warn("Seek failed for {}: {}", videoId, e.toString());
             }
         });
     }
@@ -527,6 +614,7 @@ public class AudioPlayer {
         paused = false;
         currentTitle = "";
         currentDownloadUrl = null;
+        currentVideoId = "";
         stopStreamInternal();
         stopClipInternal();
         restoreMinecraftMusic();
@@ -1039,6 +1127,7 @@ public class AudioPlayer {
         paused = false;
         currentTitle = "";
         currentDownloadUrl = null;
+        currentVideoId = "";
     }
 
     private SourceDataLine createSourceLine(AudioFormat format) throws LineUnavailableException {

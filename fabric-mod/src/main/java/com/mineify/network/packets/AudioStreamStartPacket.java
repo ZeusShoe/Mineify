@@ -9,6 +9,7 @@ import net.minecraft.util.Identifier;
 public record AudioStreamStartPacket(
         String videoId,
         String title,
+        String downloadUrl,
         long streamId,
         int sampleRate,
         int channels,
@@ -28,6 +29,7 @@ public record AudioStreamStartPacket(
                     (value, buf) -> {
                         buf.writeString(value.videoId());
                         buf.writeString(value.title());
+                        buf.writeString(value.downloadUrl());
                         buf.writeLong(value.streamId());
                         buf.writeInt(value.sampleRate());
                         buf.writeInt(value.channels());
@@ -40,6 +42,7 @@ public record AudioStreamStartPacket(
                         buf.writeBoolean(value.serverSkipped());
                     },
                     buf -> new AudioStreamStartPacket(
+                            buf.readString(),
                             buf.readString(),
                             buf.readString(),
                             buf.readLong(),

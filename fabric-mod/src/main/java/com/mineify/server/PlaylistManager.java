@@ -16,6 +16,7 @@ import com.mineify.network.packets.SpotifyImportPreviewPacket;
 import com.mineify.network.packets.ProfilesSyncPacket;
 import com.mineify.network.packets.RecentlyPlayedSyncPacket;
 import com.mineify.network.packets.SearchResultsPacket;
+import com.mineify.network.packets.SeekPlaybackPacket;
 import com.mineify.network.packets.SpotifyImportFinishedPacket;
 import com.mineify.network.packets.SpotifyImportPromptPacket;
 import com.mineify.network.packets.UserPlaylistsSyncPacket;
@@ -428,14 +429,13 @@ public class PlaylistManager {
             return;
         }
         long clampedMs = Math.max(0, Math.min(requestedMs, Math.max(0, currentTrackDurationMs)));
-        long seekNonce = ++seekRequestNonce;
         long scheduledDelayMs = 0L;
         PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
 
         if (paused) {
             pausedElapsedMs = clampedMs;
-            // While paused, do not start new audio playback. Keep seek target only.
             stopStream();
+            broadcastSeekToAll(entry.videoId(), clampedMs, true);
             broadcastNowPlaying(entry.title(), clampedMs);
             return;
         } else {
@@ -443,7 +443,7 @@ public class PlaylistManager {
         }
 
         stopStream();
-        restartStreamFromOffset(entry, clampedMs, seekNonce);
+        broadcastSeekToAll(entry.videoId(), clampedMs, false);
         broadcastNowPlaying(entry.title(), clampedMs);
         scheduleAdvanceFromCurrentState();
     }
@@ -1046,6 +1046,7 @@ public class PlaylistManager {
                 AudioStreamStartPacket startPacket = new AudioStreamStartPacket(
                         entry.videoId(),
                         entry.title(),
+                        session.downloadUrl,
                         session.streamId,
                         session.info.sampleRate,
                         session.info.channels,
@@ -1115,6 +1116,7 @@ public class PlaylistManager {
         AudioStreamStartPacket packet = new AudioStreamStartPacket(
                 entry.videoId(),
                 entry.title(),
+                session.downloadUrl,
                 session.streamId,
                 session.info.sampleRate,
                 session.info.channels,
@@ -1416,12 +1418,10 @@ public class PlaylistManager {
 
         playbackStartNanos = System.nanoTime() - (pausedElapsedMs * 1_000_000L);
         paused = false;
+        PlaylistSyncPacket.Entry entry = playlist.get(currentIndex);
+        broadcastSeekToAll(entry.videoId(), pausedElapsedMs, false);
         broadcastPlaybackState(false);
-        broadcastNowPlaying(playlist.get(currentIndex).title(), getElapsedPlaybackMs());
-        if (currentStream == null || currentStream.cancelled) {
-            // Fallback: if no live stream exists, recover by restarting from paused offset.
-            restartStreamFromOffset(playlist.get(currentIndex), pausedElapsedMs);
-        }
+        broadcastNowPlaying(entry.title(), getElapsedPlaybackMs());
         scheduleAdvanceFromCurrentState();
     }
 
@@ -1477,6 +1477,13 @@ public class PlaylistManager {
 
     private void broadcastPlaybackLock(boolean locked) {
         PlaybackLockPacket packet = new PlaybackLockPacket(locked);
+        for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+            ServerPlayNetworking.send(player, packet);
+        }
+    }
+
+    private void broadcastSeekToAll(String videoId, long elapsedMs, boolean pausedState) {
+        SeekPlaybackPacket packet = new SeekPlaybackPacket(videoId, elapsedMs, pausedState);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             ServerPlayNetworking.send(player, packet);
         }
