@@ -36,6 +36,8 @@ dependencies {
     include "com.googlecode.soundlibs:tritonus-share:0.3.7-2"
     implementation "org.tomlj:tomlj:1.1.0"
     include "org.tomlj:tomlj:1.1.0"
+    implementation "org.antlr:antlr4-runtime:4.13.1"
+    include "org.antlr:antlr4-runtime:4.13.1"
 }
 
 processResources {
